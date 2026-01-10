@@ -1,12 +1,4 @@
-export interface BybitKlineData {
-    start: string;
-    open: string;
-    high: string;
-    low: string;
-    close: string;
-    volume: string;
-    turnover: string;
-}
+export type BybitKlineData = string[];
 
 export interface BybitKlineResponse {
     retCode: number;

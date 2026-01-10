@@ -1,6 +1,7 @@
 // src/config/types.ts
 export const TYPES = {
     IExchange: Symbol.for('IExchange'),
+    IDataFeed: Symbol.for('IDataFeed'),
     IIndicatorEngine: Symbol.for('IIndicatorEngine'),
     IMarketRegimeFilter: Symbol.for('IMarketRegimeFilter'),
     IRangeDetector: Symbol.for('IRangeDetector'),

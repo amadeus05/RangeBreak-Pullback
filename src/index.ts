@@ -1,21 +1,35 @@
 import 'reflect-metadata';
-import { createContainer, TYPES } from './config/inversify.config';
-import { RangeBreakPullbackStrategy } from './application/strategies/RangeBreakPullbackStrategy';
+import { runBacktestCommand } from './presentation/cli/BacktestCommand';
+import { runLiveCommand } from './presentation/cli/LiveCommand';
 import { Logger } from './shared/logger/Logger';
 
 async function main() {
     const logger = Logger.getInstance();
-    logger.info('Starting Range Break + Pullback Strategy');
+    const args = process.argv.slice(2);
+    const mode = args[0]; // 'backtest' или 'live'
 
-    // Create DI container for backtest mode
-    const container = createContainer('backtest');
-    
-    // Get strategy instance
-    const strategy = container.get<RangeBreakPullbackStrategy>(TYPES.Strategy);
-    
-    logger.info('Strategy initialized successfully');
-    
-    // TODO: Implement backtest runner or live trading loop
+    try {
+        if (mode === 'live') {
+            const symbol = args[1] || 'BTCUSDT';
+            logger.info(`Starting LIVE TRADING for ${symbol}...`);
+            await runLiveCommand({ symbol });
+        } 
+        else {
+            // По умолчанию запускаем Backtest
+            const symbol = args[1] || 'BTCUSDT';
+            const days = parseInt(args[2]) || 7; // 360 дней по умолчанию
+
+            logger.info(`Starting BACKTEST for ${symbol} (last ${days} days)...`);
+            if (!mode) {
+                logger.info('Tip: You can specify args: npm run dev backtest ETHUSDT 180');
+            }
+            
+            await runBacktestCommand({ symbol, days });
+        }
+    } catch (error) {
+        logger.error('Application crashed', error);
+        process.exit(1);
+    }
 }
 
 main().catch(err => {

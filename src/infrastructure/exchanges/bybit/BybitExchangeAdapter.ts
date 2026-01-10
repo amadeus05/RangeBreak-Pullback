@@ -9,14 +9,22 @@ import { BybitKlineResponse, BybitTickerResponse } from './types/BybitTypes';
 export class BybitExchangeAdapter implements IExchange {
     private readonly baseUrl = 'https://api.bybit.com';
 
-    async getCandles(symbol: string, timeframe: string, limit: number = 200): Promise<Candle[]> {
+    async getCandles(symbol: string, timeframe: string, limit: number = 200, endTime?: number): Promise<Candle[]> {
         const endpoint = '/v5/market/kline';
+        
+        // Преобразуем внутренний формат (1m, 5m) в формат Bybit API (1, 5)
+        const bybitInterval = this.mapTimeframeToBybit(timeframe);
+
         const params = new URLSearchParams({
             category: 'linear',
             symbol: symbol,
-            interval: timeframe,
+            interval: bybitInterval,
             limit: limit.toString()
         });
+
+        if (endTime) {
+            params.append('end', endTime.toString());
+        }
 
         const response = await fetch(`${this.baseUrl}${endpoint}?${params}`);
         const json = await response.json() as BybitKlineResponse;
@@ -25,7 +33,25 @@ export class BybitExchangeAdapter implements IExchange {
             throw new Error(`Bybit API error: ${json.retMsg}`);
         }
 
+        // Bybit возвращает данные от Новых к Старым. 
+        // Мы разворачиваем массив, чтобы получить хронологический порядок (Старые -> Новые).
         return BybitCandleMapper.toDomainArray(json.result.list, symbol, timeframe).reverse();
+    }
+
+    private mapTimeframeToBybit(tf: string): string {
+        const map: Record<string, string> = {
+            '1m': '1',
+            '3m': '3',
+            '5m': '5',
+            '15m': '15',
+            '30m': '30',
+            '1h': '60',
+            '2h': '120',
+            '4h': '240',
+            '1d': 'D',
+            '1w': 'W'
+        };
+        return map[tf] || tf;
     }
 
     async getCurrentPrice(symbol: string): Promise<number> {
@@ -46,7 +72,7 @@ export class BybitExchangeAdapter implements IExchange {
     }
 
     async placeOrder(symbol: string, side: 'Buy' | 'Sell', qty: number, price?: number): Promise<string> {
-        throw new Error('Not implemented - use PaperTradingExchange for backtest');
+        throw new Error('Not implemented in Bybit adapter (Read-only for DataFeed)');
     }
 
     async cancelOrder(orderId: string): Promise<void> {
