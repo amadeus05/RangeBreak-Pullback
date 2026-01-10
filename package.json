@@ -1,0 +1,32 @@
+{
+  "name": "range-break-pullback-strategy",
+  "version": "1.0.0",
+  "description": "Range Break + Pullback trading strategy with TypeScript, DI, and Prisma",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "check": "tsc --noEmit",
+    "check:watch": "tsc --noEmit --watch",
+    "lint": "tsc --noEmit && echo 'TypeScript check passed!'",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "inversify": "^6.2.2",
+    "reflect-metadata": "^0.2.2"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^20.19.28",
+    "jest": "^29.7.0",
+    "prisma": "^5.22.0",
+    "ts-jest": "^29.4.6",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}

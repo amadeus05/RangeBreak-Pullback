@@ -1,0 +1,89 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Candle {
+  id         Int      @id @default(autoincrement())
+  timestamp  BigInt   @unique
+  symbol     String
+  timeframe  String
+  open       Float
+  high       Float
+  low        Float
+  close      Float
+  volume     Float
+  createdAt  DateTime @default(now())
+
+  @@index([symbol, timeframe, timestamp])
+  @@map("candles")
+}
+
+model Trade {
+  id                Int      @id @default(autoincrement())
+  symbol            String
+  direction         String   // LONG or SHORT
+  entryTime         BigInt
+  exitTime          BigInt?
+  entryPrice        Float
+  exitPrice         Float?
+  size              Float
+  stopLoss          Float
+  takeProfit        Float
+  pnl               Float?
+  pnlPercent        Float?
+  status            String   // OPEN, CLOSED, CANCELLED
+  exitReason        String?  // TP, SL, TIMEOUT, MANUAL
+  strategyState     String?  // State when trade was placed
+  rangeHigh         Float?
+  rangeLow          Float?
+  breakoutPrice     Float?
+  pullbackPrice     Float?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([symbol, entryTime])
+  @@index([status])
+  @@map("trades")
+}
+
+model BacktestRun {
+  id              Int      @id @default(autoincrement())
+  symbol          String
+  startDate       BigInt
+  endDate         BigInt
+  initialBalance  Float
+  finalBalance    Float
+  totalTrades     Int
+  winningTrades   Int
+  losingTrades    Int
+  winRate         Float
+  profitFactor    Float?
+  maxDrawdown     Float?
+  sharpeRatio     Float?
+  totalPnl        Float
+  config          String   // JSON stringified config
+  createdAt       DateTime @default(now())
+
+  @@map("backtest_runs")
+}
+
+model DailyStats {
+  id              Int      @id @default(autoincrement())
+  date            String   @unique // YYYY-MM-DD
+  symbol          String
+  trades          Int
+  wins            Int
+  losses          Int
+  pnl             Float
+  balance         Float
+  maxDrawdown     Float?
+  createdAt       DateTime @default(now())
+
+  @@index([date])
+  @@map("daily_stats")
+}

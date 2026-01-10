@@ -1,0 +1,1986 @@
+﻿================================================================================
+  PUMP SCOUT BOT - Project full code collection
+  DATA: 2026-01-10 13:02:24
+  ISKLYUCHENO: src/generated
+================================================================================
+
+
+========================================================================
+  FILE: src/index.ts
+========================================================================
+
+import 'reflect-metadata';
+import { createContainer, TYPES } from './config/inversify.config';
+import { RangeBreakPullbackStrategy } from './application/strategies/RangeBreakPullbackStrategy';
+import { Logger } from './shared/logger/Logger';
+
+async function main() {
+    const logger = Logger.getInstance();
+    logger.info('Starting Range Break + Pullback Strategy');
+
+    // Create DI container for backtest mode
+    const container = createContainer('backtest');
+    
+    // Get strategy instance
+    const strategy = container.get<RangeBreakPullbackStrategy>(TYPES.Strategy);
+    
+    logger.info('Strategy initialized successfully');
+    
+    // TODO: Implement backtest runner or live trading loop
+}
+
+main().catch(err => {
+    console.error('Fatal error:', err);
+    process.exit(1);
+});
+
+
+========================================================================
+  FILE: src/application/services/detection/BreakoutDetector.ts
+========================================================================
+
+import { injectable } from 'inversify';
+import { IBreakoutDetector } from '../../../domain/interfaces/IBreakoutDetector';
+import { Candle } from '../../../domain/entities/Candle';
+import { MarketRange } from '../../../domain/value-objects/MarketRange';
+import { BreakoutSignal } from '../../../domain/value-objects/BreakoutSignal';
+import { TradeDirection } from '../../../domain/enums/TradeDirection';
+
+@injectable()
+export class BreakoutDetector implements IBreakoutDetector {
+    detectBreakout(
+        candle: Candle,
+        range: MarketRange,
+        atr: number,
+        volumeSMA: number
+    ): BreakoutSignal | null {
+        // LONG: close > range.high + 0.1*ATR
+        const longBreakout = candle.close > range.high + 0.1 * atr;
+        
+        // SHORT: close < range.low - 0.1*ATR
+        const shortBreakout = candle.close < range.low - 0.1 * atr;
+
+        // Body >= 60% of candle
+        const bodyValid = candle.bodyPercent >= 60;
+
+        // Volume > SMA(volume, 20)
+        const volumeValid = candle.volume > volumeSMA;
+
+        if (longBreakout && bodyValid && volumeValid) {
+            const impulseSize = candle.close - range.high;
+            return new BreakoutSignal(
+                TradeDirection.LONG,
+                impulseSize,
+                candle.high,
+                range.high,
+                candle.timestamp,
+                candle.close
+            );
+        }
+
+        if (shortBreakout && bodyValid && volumeValid) {
+            const impulseSize = range.low - candle.close;
+            return new BreakoutSignal(
+                TradeDirection.SHORT,
+                impulseSize,
+                range.low,
+                candle.low,
+                candle.timestamp,
+                candle.close
+            );
+        }
+
+        return null;
+    }
+}
+
+
+========================================================================
+  FILE: src/application/services/detection/index.ts
+========================================================================
+
+export * from './RangeDetector';
+export * from './BreakoutDetector';
+
+
+========================================================================
+  FILE: src/application/services/detection/RangeDetector.ts
+========================================================================
+
+import { injectable } from 'inversify';
+import { IRangeDetector } from '../../../domain/interfaces/IRangeDetector';
+import { Candle } from '../../../domain/entities/Candle';
+import { MarketRange } from '../../../domain/value-objects/MarketRange';
+
+@injectable()
+export class RangeDetector implements IRangeDetector {
+    private readonly RANGE_WINDOW = 30;
+
+    detectRange(candles: Candle[]): MarketRange | null {
+        if (candles.length < this.RANGE_WINDOW) return null;
+
+        const window = candles.slice(-this.RANGE_WINDOW);
+        return MarketRange.create(window);
+    }
+
+    isRangeValid(range: MarketRange, atr: number): boolean {
+        // Range size >= 1.2 * ATR
+        // Range size <= 3.5 * ATR
+        return range.size >= 1.2 * atr && range.size <= 3.5 * atr;
+    }
+}
+
+
+========================================================================
+  FILE: src/application/services/indicators/index.ts
+========================================================================
+
+export * from './IndicatorEngine';
+
+
+========================================================================
+  FILE: src/application/services/indicators/IndicatorEngine.ts
+========================================================================
+
+import { injectable } from 'inversify';
+import { IIndicatorEngine } from '../../../domain/interfaces/IIndicatorEngine';
+import { Candle } from '../../../domain/entities/Candle';
+
+@injectable()
+export class IndicatorEngine implements IIndicatorEngine {
+    calculateATR(candles: Candle[], period: number = 14): number {
+        if (candles.length < period + 1) return 0;
+
+        const trueRanges: number[] = [];
+        
+        for (let i = 1; i < candles.length; i++) {
+            const high = candles[i].high;
+            const low = candles[i].low;
+            const prevClose = candles[i - 1].close;
+            
+            const tr = Math.max(
+                high - low,
+                Math.abs(high - prevClose),
+                Math.abs(low - prevClose)
+            );
+            trueRanges.push(tr);
+        }
+
+        return this.calculateSMA(trueRanges.slice(-period), period);
+    }
+
+    calculateADX(candles: Candle[], period: number = 14): number {
+        if (candles.length < period * 2) return 0;
+
+        const smoothing = period;
+        let plusDM: number[] = [];
+        let minusDM: number[] = [];
+        let tr: number[] = [];
+
+        for (let i = 1; i < candles.length; i++) {
+            const highDiff = candles[i].high - candles[i - 1].high;
+            const lowDiff = candles[i - 1].low - candles[i].low;
+
+            const plusDMValue = highDiff > lowDiff && highDiff > 0 ? highDiff : 0;
+            const minusDMValue = lowDiff > highDiff && lowDiff > 0 ? lowDiff : 0;
+
+            plusDM.push(plusDMValue);
+            minusDM.push(minusDMValue);
+
+            const trValue = Math.max(
+                candles[i].high - candles[i].low,
+                Math.abs(candles[i].high - candles[i - 1].close),
+                Math.abs(candles[i].low - candles[i - 1].close)
+            );
+            tr.push(trValue);
+        }
+
+        const smoothedPlusDM = this.calculateSMA(plusDM.slice(-smoothing), smoothing);
+        const smoothedMinusDM = this.calculateSMA(minusDM.slice(-smoothing), smoothing);
+        const smoothedTR = this.calculateSMA(tr.slice(-smoothing), smoothing);
+
+        const plusDI = smoothedTR !== 0 ? (smoothedPlusDM / smoothedTR) * 100 : 0;
+        const minusDI = smoothedTR !== 0 ? (smoothedMinusDM / smoothedTR) * 100 : 0;
+
+        const dx = plusDI + minusDI !== 0 
+            ? (Math.abs(plusDI - minusDI) / (plusDI + minusDI)) * 100 
+            : 0;
+
+        return dx;
+    }
+
+    calculateVWAP(candles: Candle[]): number {
+        if (candles.length === 0) return 0;
+
+        let cumulativeTPV = 0;
+        let cumulativeVolume = 0;
+
+        for (const candle of candles) {
+            const typicalPrice = (candle.high + candle.low + candle.close) / 3;
+            cumulativeTPV += typicalPrice * candle.volume;
+            cumulativeVolume += candle.volume;
+        }
+
+        return cumulativeVolume !== 0 ? cumulativeTPV / cumulativeVolume : 0;
+    }
+
+    calculateSMA(values: number[], period: number): number {
+        if (values.length < period) return 0;
+        const slice = values.slice(-period);
+        return slice.reduce((sum, val) => sum + val, 0) / period;
+    }
+}
+
+
+========================================================================
+  FILE: src/application/services/market/index.ts
+========================================================================
+
+export * from './MarketRegimeFilter';
+
+
+========================================================================
+  FILE: src/application/services/market/MarketRegimeFilter.ts
+========================================================================
+
+import { injectable, inject } from 'inversify';
+import { IMarketRegimeFilter } from '../../../domain/interfaces/IMarketRegimeFilter';
+import { IIndicatorEngine } from '../../../domain/interfaces/IIndicatorEngine';
+import { Candle } from '../../../domain/entities/Candle';
+import { TYPES } from '../../../config/inversify.config';
+
+@injectable()
+export class MarketRegimeFilter implements IMarketRegimeFilter {
+    constructor(
+        @inject(TYPES.IIndicatorEngine) private readonly indicatorEngine: IIndicatorEngine
+    ) {}
+
+    isMarketValid(candles5m: Candle[]): boolean {
+        if (candles5m.length < 30) return false;
+
+        const adx = this.indicatorEngine.calculateADX(candles5m, 14);
+        const atr = this.indicatorEngine.calculateATR(candles5m, 14);
+        const lastCandle = candles5m[candles5m.length - 1];
+        
+        const volatilityPercent = (atr / lastCandle.close) * 100;
+
+        // ADX ∈ [18, 35]
+        const adxValid = adx >= 18 && adx <= 35;
+        
+        // ATR/Close ∈ [0.15%, 0.6%]
+        const volValid = volatilityPercent >= 0.15 && volatilityPercent <= 0.6;
+
+        return adxValid && volValid;
+    }
+}
+
+
+========================================================================
+  FILE: src/application/services/risk/index.ts
+========================================================================
+
+export * from './RiskEngine';
+
+
+========================================================================
+  FILE: src/application/services/risk/RiskEngine.ts
+========================================================================
+
+import { injectable } from 'inversify';
+import { IRiskEngine } from '../../../domain/interfaces/IRiskEngine';
+
+@injectable()
+export class RiskEngine implements IRiskEngine {
+    private readonly RISK_PERCENT = 0.01; // 1%
+    private readonly MAX_DAILY_LOSS = 0.02; // 2%
+    private readonly MAX_CONSECUTIVE_LOSSES = 2;
+
+    calculatePositionSize(balance: number, stopDistance: number): number {
+        const riskAmount = balance * this.RISK_PERCENT;
+        return riskAmount / stopDistance;
+    }
+
+    canTrade(balance: number, dailyLoss: number, consecutiveLosses: number): boolean {
+        const dailyLossPercent = dailyLoss / balance;
+        
+        if (dailyLossPercent >= this.MAX_DAILY_LOSS) return false;
+        if (consecutiveLosses >= this.MAX_CONSECUTIVE_LOSSES) return false;
+        
+        return true;
+    }
+}
+
+
+========================================================================
+  FILE: src/application/services/state/index.ts
+========================================================================
+
+export * from './StateMachine';
+
+
+========================================================================
+  FILE: src/application/services/state/StateMachine.ts
+========================================================================
+
+import { injectable } from 'inversify';
+import { IStateMachine } from '../../../domain/interfaces/IStateMachine';
+import { StrategyState } from '../../../domain/enums/StrategyState';
+
+interface StateTransition {
+    state: StrategyState;
+    timestamp: number;
+    reason: string;
+}
+
+@injectable()
+export class StateMachine implements IStateMachine {
+    private currentState: StrategyState = StrategyState.IDLE;
+    private stateHistory: StateTransition[] = [];
+
+    getCurrentState(): StrategyState {
+        return this.currentState;
+    }
+
+    transition(newState: StrategyState, reason: string): void {
+        if (!this.canTransition(newState)) {
+            console.warn(`Invalid transition from ${this.currentState} to ${newState}`);
+            return;
+        }
+
+        console.log(`State transition: ${this.currentState} → ${newState} (${reason})`);
+        
+        this.stateHistory.push({
+            state: this.currentState,
+            timestamp: Date.now(),
+            reason
+        });
+
+        this.currentState = newState;
+    }
+
+    canTransition(newState: StrategyState): boolean {
+        const validTransitions: Record<StrategyState, StrategyState[]> = {
+            [StrategyState.IDLE]: [StrategyState.RANGE_DEFINED],
+            [StrategyState.RANGE_DEFINED]: [StrategyState.BREAKOUT_DETECTED, StrategyState.RESET],
+            [StrategyState.BREAKOUT_DETECTED]: [StrategyState.WAIT_PULLBACK, StrategyState.RESET],
+            [StrategyState.WAIT_PULLBACK]: [StrategyState.ENTRY_PLACED, StrategyState.RESET],
+            [StrategyState.ENTRY_PLACED]: [StrategyState.IN_POSITION, StrategyState.RESET],
+            [StrategyState.IN_POSITION]: [StrategyState.EXIT, StrategyState.RESET],
+            [StrategyState.EXIT]: [StrategyState.RESET],
+            [StrategyState.RESET]: [StrategyState.IDLE]
+        };
+
+        return validTransitions[this.currentState]?.includes(newState) ?? false;
+    }
+
+    reset(): void {
+        this.transition(StrategyState.RESET, 'Manual reset');
+        this.transition(StrategyState.IDLE, 'Reset complete');
+    }
+
+    getHistory(): StateTransition[] {
+        return [...this.stateHistory];
+    }
+}
+
+
+========================================================================
+  FILE: src/application/services/validation/index.ts
+========================================================================
+
+export * from './PullbackValidator';
+
+
+========================================================================
+  FILE: src/application/services/validation/PullbackValidator.ts
+========================================================================
+
+import { injectable } from 'inversify';
+import { IPullbackValidator } from '../../../domain/interfaces/IPullbackValidator';
+import { Candle } from '../../../domain/entities/Candle';
+import { BreakoutSignal } from '../../../domain/value-objects/BreakoutSignal';
+import { MarketRange } from '../../../domain/value-objects/MarketRange';
+import { TradeDirection } from '../../../domain/enums/TradeDirection';
+
+@injectable()
+export class PullbackValidator implements IPullbackValidator {
+    private readonly MAX_PULLBACK_CANDLES = 10;
+
+    isPullbackValid(
+        candles1m: Candle[],
+        breakout: BreakoutSignal,
+        range: MarketRange,
+        vwap: number
+    ): boolean {
+        if (candles1m.length === 0) return false;
+
+        const lastCandle = candles1m[candles1m.length - 1];
+        
+        // Check pullback depth <= 50% impulse
+        if (breakout.direction === TradeDirection.LONG) {
+            const pullbackDepth = breakout.price - lastCandle.low;
+            if (pullbackDepth > breakout.impulseSize * 0.5) return false;
+
+            // Price returned to range.high or VWAP
+            const nearRangeHigh = Math.abs(lastCandle.close - range.high) < range.high * 0.002;
+            const nearVWAP = Math.abs(lastCandle.close - vwap) < vwap * 0.002;
+            
+            return nearRangeHigh || nearVWAP;
+        } else {
+            const pullbackDepth = lastCandle.high - breakout.price;
+            if (pullbackDepth > breakout.impulseSize * 0.5) return false;
+
+            const nearRangeLow = Math.abs(lastCandle.close - range.low) < range.low * 0.002;
+            const nearVWAP = Math.abs(lastCandle.close - vwap) < vwap * 0.002;
+            
+            return nearRangeLow || nearVWAP;
+        }
+    }
+
+    hasPullbackPattern(candle: Candle, direction: TradeDirection): boolean {
+        // Pinbar: shadow > 2x body
+        const isPinbar = direction === TradeDirection.LONG
+            ? candle.lowerWick > candle.body * 2
+            : candle.upperWick > candle.body * 2;
+
+        // Engulfing: simplified (needs previous candle for full check)
+        const isEngulfing = candle.bodyPercent > 70;
+
+        return isPinbar || isEngulfing;
+    }
+}
+
+
+========================================================================
+  FILE: src/application/strategies/index.ts
+========================================================================
+
+export * from './RangeBreakPullbackStrategy';
+
+
+========================================================================
+  FILE: src/application/strategies/RangeBreakPullbackStrategy.ts
+========================================================================
+
+import { injectable, inject } from 'inversify';
+import { IExchange } from '../../domain/interfaces/IExchange';
+import { IIndicatorEngine } from '../../domain/interfaces/IIndicatorEngine';
+import { IMarketRegimeFilter } from '../../domain/interfaces/IMarketRegimeFilter';
+import { IRangeDetector } from '../../domain/interfaces/IRangeDetector';
+import { IBreakoutDetector } from '../../domain/interfaces/IBreakoutDetector';
+import { IPullbackValidator } from '../../domain/interfaces/IPullbackValidator';
+import { IRiskEngine } from '../../domain/interfaces/IRiskEngine';
+import { IStateMachine } from '../../domain/interfaces/IStateMachine';
+import { Candle } from '../../domain/entities/Candle';
+import { MarketRange } from '../../domain/value-objects/MarketRange';
+import { BreakoutSignal } from '../../domain/value-objects/BreakoutSignal';
+import { StrategyState } from '../../domain/enums/StrategyState';
+import { TYPES } from '../../config/inversify.config';
+
+@injectable()
+export class RangeBreakPullbackStrategy {
+    private currentRange: MarketRange | null = null;
+    private currentBreakout: BreakoutSignal | null = null;
+    private pullbackStartTime: number | null = null;
+    private dailyLoss: number = 0;
+    private consecutiveLosses: number = 0;
+    
+    constructor(
+        @inject(TYPES.IExchange) private readonly exchange: IExchange,
+        @inject(TYPES.IIndicatorEngine) private readonly indicatorEngine: IIndicatorEngine,
+        @inject(TYPES.IMarketRegimeFilter) private readonly marketFilter: IMarketRegimeFilter,
+        @inject(TYPES.IRangeDetector) private readonly rangeDetector: IRangeDetector,
+        @inject(TYPES.IBreakoutDetector) private readonly breakoutDetector: IBreakoutDetector,
+        @inject(TYPES.IPullbackValidator) private readonly pullbackValidator: IPullbackValidator,
+        @inject(TYPES.IRiskEngine) private readonly riskEngine: IRiskEngine,
+        @inject(TYPES.IStateMachine) private readonly stateMachine: IStateMachine
+    ) {}
+
+    async processTick(symbol: string, candles5m: Candle[], candles1m: Candle[]): Promise<void> {
+        const currentState = this.stateMachine.getCurrentState();
+
+        // Global kill switch check
+        const balance = 10000; // TODO: get from exchange
+        if (!this.riskEngine.canTrade(balance, this.dailyLoss, this.consecutiveLosses)) {
+            this.stateMachine.transition(StrategyState.RESET, 'Kill switch activated');
+            return;
+        }
+        
+        switch (currentState) {
+            case StrategyState.IDLE:
+                await this.handleIdleState(candles5m);
+                break;
+            
+            case StrategyState.RANGE_DEFINED:
+                await this.handleRangeDefinedState(candles5m);
+                break;
+            
+            case StrategyState.BREAKOUT_DETECTED:
+                await this.handleBreakoutDetectedState();
+                break;
+            
+            case StrategyState.WAIT_PULLBACK:
+                await this.handleWaitPullbackState(candles1m, candles5m);
+                break;
+            
+            case StrategyState.ENTRY_PLACED:
+                // Wait for order fill - handled by execution engine
+                break;
+            
+            case StrategyState.IN_POSITION:
+                // Monitor position - handled by position manager
+                break;
+            
+            case StrategyState.RESET:
+                this.handleResetState();
+                break;
+        }
+    }
+
+    private async handleIdleState(candles5m: Candle[]): Promise<void> {
+        const marketValid = this.marketFilter.isMarketValid(candles5m);
+        
+        if (marketValid) {
+            const range = this.rangeDetector.detectRange(candles5m);
+            const atr = this.indicatorEngine.calculateATR(candles5m, 14);
+            
+            if (range && this.rangeDetector.isRangeValid(range, atr)) {
+                this.currentRange = range;
+                this.stateMachine.transition(StrategyState.RANGE_DEFINED, 'Valid range detected');
+            }
+        }
+    }
+
+    private async handleRangeDefinedState(candles5m: Candle[]): Promise<void> {
+        if (!this.currentRange) {
+            this.stateMachine.transition(StrategyState.RESET, 'No range defined');
+            return;
+        }
+
+        const lastCandle = candles5m[candles5m.length - 1];
+        const atr = this.indicatorEngine.calculateATR(candles5m, 14);
+        const volumes = candles5m.map(c => c.volume);
+        const volumeSMA = this.indicatorEngine.calculateSMA(volumes, 20);
+
+        const breakout = this.breakoutDetector.detectBreakout(lastCandle, this.currentRange, atr, volumeSMA);
+        
+        if (breakout) {
+            this.currentBreakout = breakout;
+            this.stateMachine.transition(StrategyState.BREAKOUT_DETECTED, `Breakout detected: ${breakout.direction}`);
+        }
+    }
+
+    private async handleBreakoutDetectedState(): Promise<void> {
+        this.pullbackStartTime = Date.now();
+        this.stateMachine.transition(StrategyState.WAIT_PULLBACK, 'Waiting for pullback');
+    }
+
+    private async handleWaitPullbackState(candles1m: Candle[], candles5m: Candle[]): Promise<void> {
+        if (!this.currentBreakout || !this.currentRange) {
+            this.stateMachine.transition(StrategyState.RESET, 'Missing breakout or range data');
+            return;
+        }
+
+        // Timeout check: 10 candles * 1m = 10 minutes
+        const elapsed = Date.now() - (this.pullbackStartTime || 0);
+        if (elapsed > 10 * 60 * 1000) {
+            this.stateMachine.transition(StrategyState.RESET, 'Pullback timeout');
+            return;
+        }
+
+        const vwap = this.indicatorEngine.calculateVWAP(candles1m);
+        const lastCandle = candles1m[candles1m.length - 1];
+
+        const pullbackValid = this.pullbackValidator.isPullbackValid(
+            candles1m,
+            this.currentBreakout,
+            this.currentRange,
+            vwap
+        );
+
+        const hasPattern = this.pullbackValidator.hasPullbackPattern(
+            lastCandle,
+            this.currentBreakout.direction
+        );
+
+        if (pullbackValid && hasPattern) {
+            this.stateMachine.transition(StrategyState.ENTRY_PLACED, 'Valid pullback with pattern');
+            // TODO: Place LIMIT order via exchange
+        }
+    }
+
+    private handleResetState(): void {
+        this.currentRange = null;
+        this.currentBreakout = null;
+        this.pullbackStartTime = null;
+        this.stateMachine.transition(StrategyState.IDLE, 'Reset complete');
+    }
+}
+
+
+========================================================================
+  FILE: src/application/use-cases/index.ts
+========================================================================
+
+export * from './RunBacktest';
+export * from './RunLiveTrading';
+
+
+========================================================================
+  FILE: src/application/use-cases/RunBacktest.ts
+========================================================================
+
+import { injectable, inject } from 'inversify';
+import { RangeBreakPullbackStrategy } from '../strategies/RangeBreakPullbackStrategy';
+import { IExchange } from '../../domain/interfaces/IExchange';
+import { CandleRepository } from '../../infrastructure/database/repositories/CandleRepository';
+import { TradeRepository } from '../../infrastructure/database/repositories/TradeRepository';
+import { Candle } from '../../domain/entities/Candle';
+import { Logger } from '../../shared/logger/Logger';
+import { TYPES } from '../../config/inversify.config';
+
+export interface BacktestConfig {
+    symbol: string;
+    startDate: Date;
+    endDate: Date;
+    initialBalance: number;
+}
+
+export interface BacktestResult {
+    totalTrades: number;
+    winningTrades: number;
+    losingTrades: number;
+    winRate: number;
+    totalPnl: number;
+    finalBalance: number;
+    maxDrawdown: number;
+    profitFactor?: number;
+}
+
+@injectable()
+export class RunBacktest {
+    private logger = Logger.getInstance();
+
+    constructor(
+        @inject(TYPES.Strategy) private readonly strategy: RangeBreakPullbackStrategy,
+        @inject(TYPES.IExchange) private readonly exchange: IExchange,
+        private readonly candleRepo: CandleRepository,
+        private readonly tradeRepo: TradeRepository
+    ) {}
+
+    async execute(config: BacktestConfig): Promise<BacktestResult> {
+        this.logger.info('Starting backtest', config);
+
+        const { symbol, startDate, endDate } = config;
+        const startTime = startDate.getTime();
+        const endTime = endDate.getTime();
+
+        // Load or fetch candles
+        const candles5m = await this.loadCandles(symbol, '5m', startTime, endTime);
+        const candles1m = await this.loadCandles(symbol, '1m', startTime, endTime);
+
+        this.logger.info(`Loaded ${candles5m.length} 5m candles, ${candles1m.length} 1m candles`);
+
+        // Run backtest simulation
+        const result = await this.runSimulation(symbol, candles5m, candles1m);
+
+        this.logger.info('Backtest complete', result);
+
+        return result;
+    }
+
+    private async loadCandles(
+        symbol: string,
+        timeframe: string,
+        startTime: number,
+        endTime: number
+    ): Promise<Candle[]> {
+        // Try to load from database first
+        const dbCandles = await this.candleRepo.getCandles(symbol, timeframe, startTime, endTime);
+
+        if (dbCandles.length > 0) {
+            this.logger.info(`Loaded ${dbCandles.length} ${timeframe} candles from database`);
+            return dbCandles;
+        }
+
+        // If not in DB, fetch from exchange API
+        this.logger.info(`Fetching ${timeframe} candles from exchange API...`);
+        const apiCandles = await this.exchange.getCandles(symbol, timeframe, 1000);
+
+        // Filter by date range
+        const filteredCandles = apiCandles.filter(
+            c => c.timestamp >= startTime && c.timestamp <= endTime
+        );
+
+        // Save to database for future use
+        await this.candleRepo.saveCandles(filteredCandles);
+        this.logger.info(`Saved ${filteredCandles.length} ${timeframe} candles to database`);
+
+        return filteredCandles;
+    }
+
+    private async runSimulation(
+        symbol: string,
+        candles5m: Candle[],
+        candles1m: Candle[]
+    ): Promise<BacktestResult> {
+        let currentIndex5m = 70; // Need at least 70 candles for indicators
+        let currentIndex1m = 30;
+
+        while (currentIndex5m < candles5m.length) {
+            const current5m = candles5m.slice(0, currentIndex5m);
+            const current1m = candles1m.slice(0, currentIndex1m);
+
+            // Process tick
+            await this.strategy.processTick(symbol, current5m, current1m);
+
+            // Move forward
+            currentIndex5m++;
+            currentIndex1m += 5; // 5m = 5 x 1m candles
+
+            if (currentIndex1m >= candles1m.length) break;
+        }
+
+        // Calculate results
+        const stats = await this.tradeRepo.getTradeStats(symbol);
+
+        return {
+            totalTrades: stats.total,
+            winningTrades: stats.wins,
+            losingTrades: stats.losses,
+            winRate: stats.winRate,
+            totalPnl: stats.totalPnl,
+            finalBalance: 10000 + stats.totalPnl, // TODO: track actual balance
+            maxDrawdown: 0, // TODO: calculate
+            profitFactor: stats.wins > 0 && stats.losses > 0 
+                ? stats.wins / stats.losses 
+                : undefined
+        };
+    }
+}
+
+
+========================================================================
+  FILE: src/application/use-cases/RunLiveTrading.ts
+========================================================================
+
+import { injectable, inject } from 'inversify';
+import { RangeBreakPullbackStrategy } from '../strategies/RangeBreakPullbackStrategy';
+import { IExchange } from '../../domain/interfaces/IExchange';
+import { Candle } from '../../domain/entities/Candle';
+import { Logger } from '../../shared/logger/Logger';
+import { TYPES } from '../../config/inversify.config';
+
+export interface LiveTradingConfig {
+    symbol: string;
+    tickInterval: number; // milliseconds
+}
+
+@injectable()
+export class RunLiveTrading {
+    private logger = Logger.getInstance();
+    private isRunning = false;
+    private candles5m: Candle[] = [];
+    private candles1m: Candle[] = [];
+
+    constructor(
+        @inject(TYPES.Strategy) private readonly strategy: RangeBreakPullbackStrategy,
+        @inject(TYPES.IExchange) private readonly exchange: IExchange
+    ) {}
+
+    async start(config: LiveTradingConfig): Promise<void> {
+        this.logger.info('Starting live trading', config);
+        this.isRunning = true;
+
+        // Initial load
+        await this.loadInitialData(config.symbol);
+
+        // Start tick loop
+        while (this.isRunning) {
+            try {
+                await this.processTick(config.symbol);
+                await this.sleep(config.tickInterval);
+            } catch (error) {
+                this.logger.error('Error in tick loop', error);
+                // Don't stop on error, continue trading
+            }
+        }
+    }
+
+    stop(): void {
+        this.logger.info('Stopping live trading');
+        this.isRunning = false;
+    }
+
+    private async loadInitialData(symbol: string): Promise<void> {
+        this.logger.info('Loading initial candle data');
+        
+        this.candles5m = await this.exchange.getCandles(symbol, '5m', 300);
+        this.candles1m = await this.exchange.getCandles(symbol, '1m', 300);
+        
+        this.logger.info(`Loaded ${this.candles5m.length} 5m and ${this.candles1m.length} 1m candles`);
+    }
+
+    private async processTick(symbol: string): Promise<void> {
+        // Fetch latest candles
+        const latest5m = await this.exchange.getCandles(symbol, '5m', 1);
+        const latest1m = await this.exchange.getCandles(symbol, '1m', 1);
+
+        if (latest5m.length > 0) {
+            this.updateCandleBuffer(this.candles5m, latest5m[0], 300);
+        }
+
+        if (latest1m.length > 0) {
+            this.updateCandleBuffer(this.candles1m, latest1m[0], 300);
+        }
+
+        // Process strategy
+        await this.strategy.processTick(symbol, this.candles5m, this.candles1m);
+    }
+
+    private updateCandleBuffer(buffer: Candle[], newCandle: Candle, maxSize: number): void {
+        // Check if last candle timestamp is same (update) or new (append)
+        const lastCandle = buffer[buffer.length - 1];
+        
+        if (lastCandle && lastCandle.timestamp === newCandle.timestamp) {
+            // Update existing candle
+            buffer[buffer.length - 1] = newCandle;
+        } else {
+            // Append new candle
+            buffer.push(newCandle);
+            
+            // Trim buffer
+            if (buffer.length > maxSize) {
+                buffer.shift();
+            }
+        }
+    }
+
+    private sleep(ms: number): Promise<void> {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+}
+
+
+========================================================================
+  FILE: src/config/index.ts
+========================================================================
+
+export * from './inversify.config';
+export * from './strategy.config';
+
+
+========================================================================
+  FILE: src/config/inversify.config.ts
+========================================================================
+
+import 'reflect-metadata';
+import { Container } from 'inversify';
+import { IExchange } from '../domain/interfaces/IExchange';
+import { IIndicatorEngine } from '../domain/interfaces/IIndicatorEngine';
+import { IMarketRegimeFilter } from '../domain/interfaces/IMarketRegimeFilter';
+import { IRangeDetector } from '../domain/interfaces/IRangeDetector';
+import { IBreakoutDetector } from '../domain/interfaces/IBreakoutDetector';
+import { IPullbackValidator } from '../domain/interfaces/IPullbackValidator';
+import { IRiskEngine } from '../domain/interfaces/IRiskEngine';
+import { IStateMachine } from '../domain/interfaces/IStateMachine';
+import { BybitExchangeAdapter } from '../infrastructure/exchanges/bybit/BybitExchangeAdapter';
+import { PaperTradingExchange } from '../infrastructure/exchanges/paper-trading/PaperTradingExchange';
+import { IndicatorEngine } from '../application/services/indicators/IndicatorEngine';
+import { MarketRegimeFilter } from '../application/services/market/MarketRegimeFilter';
+import { RangeDetector } from '../application/services/detection/RangeDetector';
+import { BreakoutDetector } from '../application/services/detection/BreakoutDetector';
+import { PullbackValidator } from '../application/services/validation/PullbackValidator';
+import { RiskEngine } from '../application/services/risk/RiskEngine';
+import { StateMachine } from '../application/services/state/StateMachine';
+import { RangeBreakPullbackStrategy } from '../application/strategies/RangeBreakPullbackStrategy';
+
+export const TYPES = {
+    IExchange: Symbol.for('IExchange'),
+    IIndicatorEngine: Symbol.for('IIndicatorEngine'),
+    IMarketRegimeFilter: Symbol.for('IMarketRegimeFilter'),
+    IRangeDetector: Symbol.for('IRangeDetector'),
+    IBreakoutDetector: Symbol.for('IBreakoutDetector'),
+    IPullbackValidator: Symbol.for('IPullbackValidator'),
+    IRiskEngine: Symbol.for('IRiskEngine'),
+    IStateMachine: Symbol.for('IStateMachine'),
+    Strategy: Symbol.for('Strategy')
+};
+
+export function createContainer(mode: 'backtest' | 'live'): Container {
+    const container = new Container();
+
+    // Exchange - зависит от режима
+    if (mode === 'backtest') {
+        container.bind<IExchange>(TYPES.IExchange).to(PaperTradingExchange).inSingletonScope();
+    } else {
+        container.bind<IExchange>(TYPES.IExchange).to(BybitExchangeAdapter).inSingletonScope();
+    }
+
+    // Services
+    container.bind<IIndicatorEngine>(TYPES.IIndicatorEngine).to(IndicatorEngine).inSingletonScope();
+    container.bind<IMarketRegimeFilter>(TYPES.IMarketRegimeFilter).to(MarketRegimeFilter);
+    container.bind<IRangeDetector>(TYPES.IRangeDetector).to(RangeDetector);
+    container.bind<IBreakoutDetector>(TYPES.IBreakoutDetector).to(BreakoutDetector);
+    container.bind<IPullbackValidator>(TYPES.IPullbackValidator).to(PullbackValidator);
+    container.bind<IRiskEngine>(TYPES.IRiskEngine).to(RiskEngine);
+    container.bind<IStateMachine>(TYPES.IStateMachine).to(StateMachine).inSingletonScope();
+
+    // Strategy
+    container.bind<RangeBreakPullbackStrategy>(TYPES.Strategy).to(RangeBreakPullbackStrategy);
+
+    return container;
+}
+
+
+========================================================================
+  FILE: src/config/strategy.config.ts
+========================================================================
+
+export const StrategyConfig = {
+    // Timeframes
+    structureTimeframe: '5m',
+    entryTimeframe: '1m',
+    
+    // Market regime
+    adx: {
+        period: 14,
+        min: 18,
+        max: 35
+    },
+    
+    volatility: {
+        atrPeriod: 14,
+        minPercent: 0.15,
+        maxPercent: 0.6
+    },
+    
+    // Range detection
+    range: {
+        window: 30, // candles
+        minSizeMultiplier: 1.2, // * ATR
+        maxSizeMultiplier: 3.5  // * ATR
+    },
+    
+    // Breakout
+    breakout: {
+        atrMultiplier: 0.1,
+        minBodyPercent: 60,
+        volumePeriod: 20
+    },
+    
+    // Pullback
+    pullback: {
+        maxDepthPercent: 50,
+        maxWaitCandles: 10, // 1m candles
+        priceTolerancePercent: 0.2
+    },
+    
+    // Risk
+    risk: {
+        riskPercentPerTrade: 1,
+        maxDailyLossPercent: 2,
+        maxConsecutiveLosses: 2,
+        rrRatio: 1.5 // min 1.5:1
+    },
+    
+    // Limits
+    limits: {
+        maxTradesPerDay: 5,
+        maxPositionTime: 30 // minutes
+    }
+};
+
+export type StrategyConfigType = typeof StrategyConfig;
+
+
+========================================================================
+  FILE: src/domain/entities/Candle.ts
+========================================================================
+
+export class Candle {
+    constructor(
+        public readonly timestamp: number,
+        public readonly open: number,
+        public readonly high: number,
+        public readonly low: number,
+        public readonly close: number,
+        public readonly volume: number,
+        public readonly symbol: string,
+        public readonly timeframe: string
+    ) {}
+
+    get body(): number {
+        return Math.abs(this.close - this.open);
+    }
+
+    get bodyPercent(): number {
+        const range = this.high - this.low;
+        return range > 0 ? (this.body / range) * 100 : 0;
+    }
+
+    get isBullish(): boolean {
+        return this.close > this.open;
+    }
+
+    get isBearish(): boolean {
+        return this.close < this.open;
+    }
+
+    get upperWick(): number {
+        return this.high - Math.max(this.open, this.close);
+    }
+
+    get lowerWick(): number {
+        return Math.min(this.open, this.close) - this.low;
+    }
+}
+
+
+========================================================================
+  FILE: src/domain/entities/index.ts
+========================================================================
+
+export * from './Candle';
+export * from './Position';
+
+
+========================================================================
+  FILE: src/domain/entities/Position.ts
+========================================================================
+
+import { TradeDirection } from '../enums/TradeDirection';
+
+export class Position {
+    constructor(
+        public readonly symbol: string,
+        public readonly direction: TradeDirection,
+        public readonly entryPrice: number,
+        public readonly size: number,
+        public readonly stopLoss: number,
+        public readonly takeProfit: number,
+        public readonly entryTime: number
+    ) {}
+
+    get risk(): number {
+        return Math.abs(this.entryPrice - this.stopLoss) * this.size;
+    }
+
+    get reward(): number {
+        return Math.abs(this.takeProfit - this.entryPrice) * this.size;
+    }
+
+    get riskRewardRatio(): number {
+        return this.reward / this.risk;
+    }
+}
+
+
+========================================================================
+  FILE: src/domain/enums/index.ts
+========================================================================
+
+export * from './StrategyState';
+export * from './TradeDirection';
+
+
+========================================================================
+  FILE: src/domain/enums/StrategyState.ts
+========================================================================
+
+export enum StrategyState {
+    IDLE = 'IDLE',
+    RANGE_DEFINED = 'RANGE_DEFINED',
+    BREAKOUT_DETECTED = 'BREAKOUT_DETECTED',
+    WAIT_PULLBACK = 'WAIT_PULLBACK',
+    ENTRY_PLACED = 'ENTRY_PLACED',
+    IN_POSITION = 'IN_POSITION',
+    EXIT = 'EXIT',
+    RESET = 'RESET'
+}
+
+
+========================================================================
+  FILE: src/domain/enums/TradeDirection.ts
+========================================================================
+
+export enum TradeDirection {
+    LONG = 'LONG',
+    SHORT = 'SHORT'
+}
+
+
+========================================================================
+  FILE: src/domain/interfaces/IBreakoutDetector.ts
+========================================================================
+
+import { Candle } from '../entities/Candle';
+import { MarketRange } from '../value-objects/MarketRange';
+import { BreakoutSignal } from '../value-objects/BreakoutSignal';
+
+export interface IBreakoutDetector {
+    detectBreakout(
+        candle: Candle,
+        range: MarketRange,
+        atr: number,
+        volumeSMA: number
+    ): BreakoutSignal | null;
+}
+
+
+========================================================================
+  FILE: src/domain/interfaces/IExchange.ts
+========================================================================
+
+import { Candle } from '../entities/Candle';
+import { Position } from '../entities/Position';
+
+export interface IExchange {
+    getCandles(symbol: string, timeframe: string, limit?: number): Promise<Candle[]>;
+    getCurrentPrice(symbol: string): Promise<number>;
+    placeOrder(symbol: string, side: 'Buy' | 'Sell', qty: number, price?: number): Promise<string>;
+    cancelOrder(orderId: string): Promise<void>;
+    getPosition(symbol: string): Promise<Position | null>;
+    closePosition(symbol: string): Promise<void>;
+}
+
+
+========================================================================
+  FILE: src/domain/interfaces/IIndicatorEngine.ts
+========================================================================
+
+import { Candle } from '../entities/Candle';
+
+export interface IIndicatorEngine {
+    calculateATR(candles: Candle[], period: number): number;
+    calculateADX(candles: Candle[], period: number): number;
+    calculateVWAP(candles: Candle[]): number;
+    calculateSMA(values: number[], period: number): number;
+}
+
+
+========================================================================
+  FILE: src/domain/interfaces/IMarketRegimeFilter.ts
+========================================================================
+
+import { Candle } from '../entities/Candle';
+
+export interface IMarketRegimeFilter {
+    isMarketValid(candles5m: Candle[]): boolean;
+}
+
+
+========================================================================
+  FILE: src/domain/interfaces/index.ts
+========================================================================
+
+export * from './IExchange';
+export * from './IIndicatorEngine';
+export * from './IMarketRegimeFilter';
+export * from './IRangeDetector';
+export * from './IBreakoutDetector';
+export * from './IPullbackValidator';
+export * from './IRiskEngine';
+export * from './IStateMachine';
+
+
+========================================================================
+  FILE: src/domain/interfaces/IPullbackValidator.ts
+========================================================================
+
+import { Candle } from '../entities/Candle';
+import { BreakoutSignal } from '../value-objects/BreakoutSignal';
+import { MarketRange } from '../value-objects/MarketRange';
+import { TradeDirection } from '../enums/TradeDirection';
+
+export interface IPullbackValidator {
+    isPullbackValid(
+        candles1m: Candle[],
+        breakout: BreakoutSignal,
+        range: MarketRange,
+        vwap: number
+    ): boolean;
+    hasPullbackPattern(candle: Candle, direction: TradeDirection): boolean;
+}
+
+
+========================================================================
+  FILE: src/domain/interfaces/IRangeDetector.ts
+========================================================================
+
+import { Candle } from '../entities/Candle';
+import { MarketRange } from '../value-objects/MarketRange';
+
+export interface IRangeDetector {
+    detectRange(candles: Candle[]): MarketRange | null;
+    isRangeValid(range: MarketRange, atr: number): boolean;
+}
+
+
+========================================================================
+  FILE: src/domain/interfaces/IRiskEngine.ts
+========================================================================
+
+export interface IRiskEngine {
+    calculatePositionSize(balance: number, stopDistance: number): number;
+    canTrade(balance: number, dailyLoss: number, consecutiveLosses: number): boolean;
+}
+
+
+========================================================================
+  FILE: src/domain/interfaces/IStateMachine.ts
+========================================================================
+
+import { StrategyState } from '../enums/StrategyState';
+
+export interface IStateMachine {
+    getCurrentState(): StrategyState;
+    transition(newState: StrategyState, reason: string): void;
+    canTransition(newState: StrategyState): boolean;
+    reset(): void;
+}
+
+
+========================================================================
+  FILE: src/domain/value-objects/BreakoutSignal.ts
+========================================================================
+
+import { TradeDirection } from '../enums/TradeDirection';
+
+export class BreakoutSignal {
+    constructor(
+        public readonly direction: TradeDirection,
+        public readonly impulseSize: number,
+        public readonly impulseHigh: number,
+        public readonly impulseLow: number,
+        public readonly timestamp: number,
+        public readonly price: number
+    ) {}
+}
+
+
+========================================================================
+  FILE: src/domain/value-objects/index.ts
+========================================================================
+
+export * from './MarketRange';
+export * from './BreakoutSignal';
+
+
+========================================================================
+  FILE: src/domain/value-objects/MarketRange.ts
+========================================================================
+
+import { Candle } from '../entities/Candle';
+
+export class MarketRange {
+    constructor(
+        public readonly high: number,
+        public readonly low: number,
+        public readonly timestamp: number,
+        public readonly size: number
+    ) {}
+
+    static create(candles: Candle[]): MarketRange {
+        const high = Math.max(...candles.map(c => c.high));
+        const low = Math.min(...candles.map(c => c.low));
+        const timestamp = Date.now();
+        const size = high - low;
+        return new MarketRange(high, low, timestamp, size);
+    }
+}
+
+
+========================================================================
+  FILE: src/infrastructure/database/repositories/CandleRepository.ts
+========================================================================
+
+import { PrismaClient, Candle as PrismaCandle } from '@prisma/client';
+import { Candle } from '../../../domain/entities/Candle';
+import { injectable } from 'inversify';
+
+@injectable()
+export class CandleRepository {
+    private prisma: PrismaClient;
+
+    constructor() {
+        this.prisma = new PrismaClient();
+    }
+
+    async saveCandles(candles: Candle[]): Promise<void> {
+        const data = candles.map(c => ({
+            timestamp: BigInt(c.timestamp),
+            symbol: c.symbol,
+            timeframe: c.timeframe,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: c.volume
+        }));
+
+        await this.prisma.candle.createMany({
+            data,
+            skipDuplicates: true 
+        }); 
+    }
+
+    async getCandles(
+        symbol: string,
+        timeframe: string,
+        startTime: number,
+        endTime: number
+    ): Promise<Candle[]> {
+        const prismaCandles = await this.prisma.candle.findMany({
+            where: {
+                symbol,
+                timeframe,
+                timestamp: {
+                    gte: BigInt(startTime),
+                    lte: BigInt(endTime)
+                }
+            },
+            orderBy: {
+                timestamp: 'asc'
+            }
+        });
+
+        return prismaCandles.map(this.toDomain);
+    }
+
+    async hasData(symbol: string, timeframe: string, timestamp: number): Promise<boolean> {
+        const count = await this.prisma.candle.count({
+            where: {
+                symbol,
+                timeframe,
+                timestamp: BigInt(timestamp)
+            }
+        });
+
+        return count > 0;
+    }
+
+    async getLastCandle(symbol: string, timeframe: string): Promise<Candle | null> {
+        const prismaCandle = await this.prisma.candle.findFirst({
+            where: {
+                symbol,
+                timeframe
+            },
+            orderBy: {
+                timestamp: 'desc'
+            }
+        });
+
+        return prismaCandle ? this.toDomain(prismaCandle) : null;
+    }
+
+    private toDomain(prismaCandle: PrismaCandle): Candle {
+        return new Candle(
+            Number(prismaCandle.timestamp),
+            prismaCandle.open,
+            prismaCandle.high,
+            prismaCandle.low,
+            prismaCandle.close,
+            prismaCandle.volume,
+            prismaCandle.symbol,
+            prismaCandle.timeframe
+        );
+    }
+
+    async disconnect(): Promise<void> {
+        await this.prisma.$disconnect();
+    }
+}
+
+
+========================================================================
+  FILE: src/infrastructure/database/repositories/index.ts
+========================================================================
+
+export * from './CandleRepository';
+export * from './TradeRepository';
+
+
+========================================================================
+  FILE: src/infrastructure/database/repositories/TradeRepository.ts
+========================================================================
+
+import { PrismaClient, Trade as PrismaTrade } from '@prisma/client';
+import { Position } from '../../../domain/entities/Position';
+import { TradeDirection } from '../../../domain/enums/TradeDirection';
+import { injectable } from 'inversify';
+
+interface TradeRecord {
+    id: number;
+    symbol: string;
+    direction: TradeDirection;
+    entryTime: number;
+    exitTime?: number;
+    entryPrice: number;
+    exitPrice?: number;
+    size: number;
+    stopLoss: number;
+    takeProfit: number;
+    pnl?: number;
+    status: 'OPEN' | 'CLOSED' | 'CANCELLED';
+    exitReason?: string;
+}
+
+@injectable()
+export class TradeRepository {
+    private prisma: PrismaClient;
+
+    constructor() {
+        this.prisma = new PrismaClient();
+    }
+
+    async saveTrade(trade: TradeRecord): Promise<number> {
+        const created = await this.prisma.trade.create({
+            data: {
+                symbol: trade.symbol,
+                direction: trade.direction,
+                entryTime: BigInt(trade.entryTime),
+                entryPrice: trade.entryPrice,
+                size: trade.size,
+                stopLoss: trade.stopLoss,
+                takeProfit: trade.takeProfit,
+                status: trade.status
+            }
+        });
+
+        return created.id;
+    }
+
+    async closeTrade(
+        id: number,
+        exitPrice: number,
+        exitTime: number,
+        exitReason: string
+    ): Promise<void> {
+        const trade = await this.prisma.trade.findUnique({ where: { id } });
+        if (!trade) throw new Error(`Trade ${id} not found`);
+
+        const pnl = trade.direction === 'LONG'
+            ? (exitPrice - trade.entryPrice) * trade.size
+            : (trade.entryPrice - exitPrice) * trade.size;
+
+        const pnlPercent = (pnl / (trade.entryPrice * trade.size)) * 100;
+
+        await this.prisma.trade.update({
+            where: { id },
+            data: {
+                exitTime: BigInt(exitTime),
+                exitPrice,
+                pnl,
+                pnlPercent,
+                status: 'CLOSED',
+                exitReason
+            }
+        });
+    }
+
+    async getOpenTrades(symbol: string): Promise<TradeRecord[]> {
+        const trades = await this.prisma.trade.findMany({
+            where: {
+                symbol,
+                status: 'OPEN'
+            }
+        });
+
+        return trades.map(this.toDomain);
+    }
+
+    async getTradeHistory(symbol: string, limit: number = 100): Promise<TradeRecord[]> {
+        const trades = await this.prisma.trade.findMany({
+            where: { symbol },
+            orderBy: { entryTime: 'desc' },
+            take: limit
+        });
+
+        return trades.map(this.toDomain);
+    }
+
+    async getTradeStats(symbol: string): Promise<{
+        total: number;
+        wins: number;
+        losses: number;
+        winRate: number;
+        totalPnl: number;
+    }> {
+        const trades = await this.prisma.trade.findMany({
+            where: {
+                symbol,
+                status: 'CLOSED'
+            }
+        });
+
+        const total = trades.length;
+        const wins = trades.filter(t => (t.pnl || 0) > 0).length;
+        const losses = trades.filter(t => (t.pnl || 0) < 0).length;
+        const winRate = total > 0 ? (wins / total) * 100 : 0;
+        const totalPnl = trades.reduce((sum, t) => sum + (t.pnl || 0), 0);
+
+        return { total, wins, losses, winRate, totalPnl };
+    }
+
+    private toDomain(prismaTrade: PrismaTrade): TradeRecord {
+        return {
+            id: prismaTrade.id,
+            symbol: prismaTrade.symbol,
+            direction: prismaTrade.direction as TradeDirection,
+            entryTime: Number(prismaTrade.entryTime),
+            exitTime: prismaTrade.exitTime ? Number(prismaTrade.exitTime) : undefined,
+            entryPrice: prismaTrade.entryPrice,
+            exitPrice: prismaTrade.exitPrice || undefined,
+            size: prismaTrade.size,
+            stopLoss: prismaTrade.stopLoss,
+            takeProfit: prismaTrade.takeProfit,
+            pnl: prismaTrade.pnl || undefined,
+            status: prismaTrade.status as 'OPEN' | 'CLOSED' | 'CANCELLED',
+            exitReason: prismaTrade.exitReason || undefined
+        };
+    }
+
+    async disconnect(): Promise<void> {
+        await this.prisma.$disconnect();
+    }
+}
+
+
+========================================================================
+  FILE: src/infrastructure/exchanges/bybit/BybitCandleMapper.ts
+========================================================================
+
+import { Candle } from '../../../domain/entities/Candle';
+import { BybitKlineData } from './types/BybitTypes';
+
+export class BybitCandleMapper {
+    static toDomain(data: BybitKlineData, symbol: string, timeframe: string): Candle {
+        return new Candle(
+            parseInt(data.start),
+            parseFloat(data.open),
+            parseFloat(data.high),
+            parseFloat(data.low),
+            parseFloat(data.close),
+            parseFloat(data.volume),
+            symbol,
+            timeframe
+        );
+    }
+
+    static toDomainArray(dataArray: BybitKlineData[], symbol: string, timeframe: string): Candle[] {
+        return dataArray.map(data => this.toDomain(data, symbol, timeframe));
+    }
+}
+
+
+========================================================================
+  FILE: src/infrastructure/exchanges/bybit/BybitExchangeAdapter.ts
+========================================================================
+
+import { injectable } from 'inversify';
+import { IExchange } from '../../../domain/interfaces/IExchange';
+import { Candle } from '../../../domain/entities/Candle';
+import { Position } from '../../../domain/entities/Position';
+import { BybitCandleMapper } from './BybitCandleMapper';
+import { BybitKlineResponse, BybitTickerResponse } from './types/BybitTypes';
+
+@injectable()
+export class BybitExchangeAdapter implements IExchange {
+    private readonly baseUrl = 'https://api.bybit.com';
+
+    async getCandles(symbol: string, timeframe: string, limit: number = 200): Promise<Candle[]> {
+        const endpoint = '/v5/market/kline';
+        const params = new URLSearchParams({
+            category: 'linear',
+            symbol: symbol,
+            interval: timeframe,
+            limit: limit.toString()
+        });
+
+        const response = await fetch(`${this.baseUrl}${endpoint}?${params}`);
+        const json = await response.json() as BybitKlineResponse;
+
+        if (json.retCode !== 0) {
+            throw new Error(`Bybit API error: ${json.retMsg}`);
+        }
+
+        return BybitCandleMapper.toDomainArray(json.result.list, symbol, timeframe).reverse();
+    }
+
+    async getCurrentPrice(symbol: string): Promise<number> {
+        const endpoint = '/v5/market/tickers';
+        const params = new URLSearchParams({
+            category: 'linear',
+            symbol: symbol
+        });
+
+        const response = await fetch(`${this.baseUrl}${endpoint}?${params}`);
+        const json = await response.json() as BybitTickerResponse;
+
+        if (json.retCode !== 0) {
+            throw new Error(`Bybit API error: ${json.retMsg}`);
+        }
+
+        return parseFloat(json.result.list[0].lastPrice);
+    }
+
+    async placeOrder(symbol: string, side: 'Buy' | 'Sell', qty: number, price?: number): Promise<string> {
+        throw new Error('Not implemented - use PaperTradingExchange for backtest');
+    }
+
+    async cancelOrder(orderId: string): Promise<void> {
+        throw new Error('Not implemented');
+    }
+
+    async getPosition(symbol: string): Promise<Position | null> {
+        throw new Error('Not implemented');
+    }
+
+    async closePosition(symbol: string): Promise<void> {
+        throw new Error('Not implemented');
+    }
+}
+
+
+========================================================================
+  FILE: src/infrastructure/exchanges/bybit/index.ts
+========================================================================
+
+export * from './BybitExchangeAdapter';
+export * from './BybitCandleMapper';
+export * from './types/BybitTypes';
+
+
+========================================================================
+  FILE: src/infrastructure/exchanges/bybit/types/BybitTypes.ts
+========================================================================
+
+export interface BybitKlineData {
+    start: string;
+    open: string;
+    high: string;
+    low: string;
+    close: string;
+    volume: string;
+    turnover: string;
+}
+
+export interface BybitKlineResponse {
+    retCode: number;
+    retMsg: string;
+    result: {
+        symbol: string;
+        category: string;
+        list: BybitKlineData[];
+    };
+    time: number;
+}
+
+export interface BybitTickerResponse {
+    retCode: number;
+    retMsg: string;
+    result: {
+        list: Array<{
+            symbol: string;
+            lastPrice: string;
+        }>;
+    };
+}
+
+
+========================================================================
+  FILE: src/infrastructure/exchanges/paper-trading/index.ts
+========================================================================
+
+export * from './PaperTradingExchange';
+
+
+========================================================================
+  FILE: src/infrastructure/exchanges/paper-trading/PaperTradingExchange.ts
+========================================================================
+
+import { injectable } from 'inversify';
+import { IExchange } from '../../../domain/interfaces/IExchange';
+import { Candle } from '../../../domain/entities/Candle';
+import { Position } from '../../../domain/entities/Position';
+import { TradeDirection } from '../../../domain/enums/TradeDirection';
+
+@injectable()
+export class PaperTradingExchange implements IExchange {
+    private positions: Map<string, Position> = new Map();
+    private orders: Map<string, any> = new Map();
+    private balance: number = 10000; // Starting balance
+    private candleData: Map<string, Candle[]> = new Map();
+
+    async getCandles(symbol: string, timeframe: string, limit?: number): Promise<Candle[]> {
+        // В backteste данные подгружаются из БД или API
+        const key = `${symbol}_${timeframe}`;
+        return this.candleData.get(key) || [];
+    }
+
+    async getCurrentPrice(symbol: string): Promise<number> {
+        const candles = await this.getCandles(symbol, '1m', 1);
+        return candles[candles.length - 1]?.close || 0;
+    }
+
+    async placeOrder(
+        symbol: string,
+        side: 'Buy' | 'Sell',
+        qty: number,
+        price?: number
+    ): Promise<string> {
+        const orderId = `order_${Date.now()}_${Math.random()}`;
+        
+        this.orders.set(orderId, {
+            symbol,
+            side,
+            qty,
+            price,
+            status: 'open',
+            timestamp: Date.now()
+        });
+
+        return orderId;
+    }
+
+    async cancelOrder(orderId: string): Promise<void> {
+        this.orders.delete(orderId);
+    }
+
+    async getPosition(symbol: string): Promise<Position | null> {
+        return this.positions.get(symbol) || null;
+    }
+
+    async closePosition(symbol: string): Promise<void> {
+        const position = this.positions.get(symbol);
+        if (!position) return;
+
+        const currentPrice = await this.getCurrentPrice(symbol);
+        const pnl = position.direction === TradeDirection.LONG
+            ? (currentPrice - position.entryPrice) * position.size
+            : (position.entryPrice - currentPrice) * position.size;
+
+        this.balance += pnl;
+        this.positions.delete(symbol);
+    }
+
+    // Helper methods for backtest
+    setCandles(symbol: string, timeframe: string, candles: Candle[]): void {
+        const key = `${symbol}_${timeframe}`;
+        this.candleData.set(key, candles);
+    }
+
+    getBalance(): number {
+        return this.balance;
+    }
+
+    fillOrder(orderId: string, fillPrice: number): void {
+        const order = this.orders.get(orderId);
+        if (!order) return;
+
+        const direction = order.side === 'Buy' ? TradeDirection.LONG : TradeDirection.SHORT;
+        
+        // Simplified: no SL/TP calculation here, done by strategy
+        const position = new Position(
+            order.symbol,
+            direction,
+            fillPrice,
+            order.qty,
+            0, // SL set by strategy
+            0, // TP set by strategy
+            Date.now()
+        );
+
+        this.positions.set(order.symbol, position);
+        this.orders.delete(orderId);
+    }
+}
+
+
+========================================================================
+  FILE: src/presentation/cli/BacktestCommand.ts
+========================================================================
+
+import { createContainer, TYPES } from '../../config/inversify.config';
+import { RunBacktest, BacktestConfig } from '../../application/use-cases/RunBacktest';
+import { CandleRepository } from '../../infrastructure/database/repositories/CandleRepository';
+import { TradeRepository } from '../../infrastructure/database/repositories/TradeRepository';
+import { Logger } from '../../shared/logger/Logger';
+
+export async function runBacktestCommand(args: {
+    symbol: string;
+    startDate: string;
+    endDate: string;
+    balance?: number;
+}): Promise<void> {
+    const logger = Logger.getInstance();
+    
+    try {
+        const container = createContainer('backtest');
+        
+        const candleRepo = new CandleRepository();
+        const tradeRepo = new TradeRepository();
+        
+        const backtestUseCase = new RunBacktest(
+            container.get(TYPES.Strategy),
+            container.get(TYPES.IExchange),
+            candleRepo,
+            tradeRepo
+        );
+
+        const config: BacktestConfig = {
+            symbol: args.symbol,
+            startDate: new Date(args.startDate),
+            endDate: new Date(args.endDate),
+            initialBalance: args.balance || 10000
+        };
+
+        const result = await backtestUseCase.execute(config);
+
+        logger.info('=== BACKTEST RESULTS ===');
+        logger.info(`Total Trades: ${result.totalTrades}`);
+        logger.info(`Win Rate: ${result.winRate.toFixed(2)}%`);
+        logger.info(`Total P&L: ${result.totalPnl.toFixed(2)}`);
+        logger.info(`Final Balance: ${result.finalBalance.toFixed(2)}`);
+
+        await candleRepo.disconnect();
+        await tradeRepo.disconnect();
+    } catch (error) {
+        logger.error('Backtest failed', error);
+        throw error;
+    }
+}
+
+
+========================================================================
+  FILE: src/presentation/cli/index.ts
+========================================================================
+
+export * from './BacktestCommand';
+export * from './LiveCommand';
+
+
+========================================================================
+  FILE: src/presentation/cli/LiveCommand.ts
+========================================================================
+
+import { createContainer, TYPES } from '../../config/inversify.config';
+import { RunLiveTrading } from '../../application/use-cases/RunLiveTrading';
+import { Logger } from '../../shared/logger/Logger';
+
+export async function runLiveCommand(args: {
+    symbol: string;
+    tickInterval?: number;
+}): Promise<void> {
+    const logger = Logger.getInstance();
+    
+    try {
+        const container = createContainer('live');
+        
+        const strategy = container.get<RunLiveTrading>(RunLiveTrading);
+
+        logger.info('Starting live trading...');
+        logger.info(`Symbol: ${args.symbol}`);
+        logger.info(`Tick Interval: ${args.tickInterval || 5000}ms`);
+
+        await strategy.start({
+            symbol: args.symbol,
+            tickInterval: args.tickInterval || 5000
+        });
+    } catch (error) {
+        logger.error('Live trading failed', error);
+        throw error;
+    }
+}
+
+
+========================================================================
+  FILE: src/shared/logger/index.ts
+========================================================================
+
+export * from './Logger';
+
+
+========================================================================
+  FILE: src/shared/logger/Logger.ts
+========================================================================
+
+export enum LogLevel {
+    DEBUG = 'DEBUG',
+    INFO = 'INFO',
+    WARN = 'WARN',
+    ERROR = 'ERROR'
+}
+
+export class Logger {
+    private static instance: Logger;
+    private logLevel: LogLevel = LogLevel.INFO;
+
+    private constructor() {}
+
+    static getInstance(): Logger {
+        if (!Logger.instance) {
+            Logger.instance = new Logger();
+        }
+        return Logger.instance;
+    }
+
+    setLogLevel(level: LogLevel): void {
+        this.logLevel = level;
+    }
+
+    debug(message: string, data?: any): void {
+        if (this.shouldLog(LogLevel.DEBUG)) {
+            this.log(LogLevel.DEBUG, message, data);
+        }
+    }
+
+    info(message: string, data?: any): void {
+        if (this.shouldLog(LogLevel.INFO)) {
+            this.log(LogLevel.INFO, message, data);
+        }
+    }
+
+    warn(message: string, data?: any): void {
+        if (this.shouldLog(LogLevel.WARN)) {
+            this.log(LogLevel.WARN, message, data);
+        }
+    }
+
+    error(message: string, error?: Error | any): void {
+        if (this.shouldLog(LogLevel.ERROR)) {
+            this.log(LogLevel.ERROR, message, error);
+        }
+    }
+
+    private shouldLog(level: LogLevel): boolean {
+        const levels = [LogLevel.DEBUG, LogLevel.INFO, LogLevel.WARN, LogLevel.ERROR];
+        return levels.indexOf(level) >= levels.indexOf(this.logLevel);
+    }
+
+    private log(level: LogLevel, message: string, data?: any): void {
+        const timestamp = new Date().toISOString();
+        const logMessage = `[${timestamp}] [${level}] ${message}`;
+        
+        switch (level) {
+            case LogLevel.DEBUG:
+            case LogLevel.INFO:
+                console.log(logMessage, data || '');
+                break;
+            case LogLevel.WARN:
+                console.warn(logMessage, data || '');
+                break;
+            case LogLevel.ERROR:
+                console.error(logMessage, data || '');
+                break;
+        }
+    }
+}
+
+
+================================================================================
+  KONETS FAYLOV
+  Vsego obrabotano failov: 54
+  Isklyuchena papka: src/generated
+================================================================================
