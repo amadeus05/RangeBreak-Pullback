@@ -43,6 +43,10 @@ export class TradeRepository {
 
         return created.id;
     }
+    
+    async clearTrades(): Promise<void> {
+        await this.prisma.trade.deleteMany({});
+    }
 
     async closeTrade(
         id: number,

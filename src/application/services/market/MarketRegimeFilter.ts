@@ -19,11 +19,12 @@ export class MarketRegimeFilter implements IMarketRegimeFilter {
         
         const volatilityPercent = (atr / lastCandle.close) * 100;
 
-        // ADX ∈ [18, 35]
-        const adxValid = adx >= 18 && adx <= 35;
+        // ИСПРАВЛЕНИЕ 3: Расширяем фильтры
+        // Было [18, 35] -> Стало [15, 50] (захватим больше трендов)
+        const adxValid = adx >= 15 && adx <= 50;
         
-        // ATR/Close ∈ [0.15%, 0.6%]
-        const volValid = volatilityPercent >= 0.15 && volatilityPercent <= 0.6;
+        // Было [0.15%, 0.6%] -> Стало [0.1%, 1.5%] (разрешаем и низкую и высокую волатильность)
+        const volValid = volatilityPercent >= 0.1 && volatilityPercent <= 1.5;
 
         return adxValid && volValid;
     }

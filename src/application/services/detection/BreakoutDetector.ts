@@ -13,20 +13,20 @@ export class BreakoutDetector implements IBreakoutDetector {
         atr: number,
         volumeSMA: number
     ): BreakoutSignal | null {
-        // LONG: close > range.high + 0.1*ATR
+        // ... (Long/Short breakout logic stays same)
         const longBreakout = candle.close > range.high + 0.1 * atr;
-        
-        // SHORT: close < range.low - 0.1*ATR
         const shortBreakout = candle.close < range.low - 0.1 * atr;
 
-        // Body >= 60% of candle
-        const bodyValid = candle.bodyPercent >= 60;
+        // Body >= 60% of candle (можно оставить или снизить до 50)
+        const bodyValid = candle.bodyPercent >= 50; 
 
-        // Volume > SMA(volume, 20)
-        const volumeValid = candle.volume > volumeSMA;
+        // ИСПРАВЛЕНИЕ 4: Объем > 80% от среднего (а не строго выше)
+        // Часто объем чуть не дотягивает до SMA, но сигнал валидный
+        const volumeValid = candle.volume > (volumeSMA * 0.8); 
 
         if (longBreakout && bodyValid && volumeValid) {
-            const impulseSize = candle.close - range.high;
+            // ... return Signal
+             const impulseSize = candle.close - range.high;
             return new BreakoutSignal(
                 TradeDirection.LONG,
                 impulseSize,
@@ -38,7 +38,8 @@ export class BreakoutDetector implements IBreakoutDetector {
         }
 
         if (shortBreakout && bodyValid && volumeValid) {
-            const impulseSize = range.low - candle.close;
+            // ... return Signal
+             const impulseSize = range.low - candle.close;
             return new BreakoutSignal(
                 TradeDirection.SHORT,
                 impulseSize,

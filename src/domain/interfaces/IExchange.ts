@@ -2,7 +2,7 @@ import { Candle } from '../entities/Candle';
 import { Position } from '../entities/Position';
 
 export interface IExchange {
-    getCandles(symbol: string, timeframe: string, limit?: number, endTime?: number): Promise<Candle[]>;
+    getCandles(symbol: string, timeframe: string, limit?: number, startTime?: number): Promise<Candle[]>;
     getCurrentPrice(symbol: string): Promise<number>;
     placeOrder(symbol: string, side: 'Buy' | 'Sell', qty: number, price?: number): Promise<string>;
     cancelOrder(orderId: string): Promise<void>;

@@ -5,4 +5,5 @@ export interface IIndicatorEngine {
     calculateADX(candles: Candle[], period: number): number;
     calculateVWAP(candles: Candle[]): number;
     calculateSMA(values: number[], period: number): number;
+    calculateEMA(candles: Candle[], period: number): number;
 }

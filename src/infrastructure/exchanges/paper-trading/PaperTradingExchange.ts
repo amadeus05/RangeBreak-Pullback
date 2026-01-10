@@ -8,7 +8,7 @@ import { TradeDirection } from '../../../domain/enums/TradeDirection';
 export class PaperTradingExchange implements IExchange {
     private positions: Map<string, Position> = new Map();
     private orders: Map<string, any> = new Map();
-    private balance: number = 10000; // Starting balance
+    private balance: number = 300; // Starting balance
     private candleData: Map<string, Candle[]> = new Map();
 
     async getCandles(symbol: string, timeframe: string, limit?: number): Promise<Candle[]> {

@@ -40,134 +40,84 @@ export class RunBacktest {
         this.logger.info('Starting backtest setup', config);
 
         const { symbol, days } = config;
+        
+        await this.tradeRepo.clearTrades();
+
         const endTime = Date.now();
         const startTime = endTime - (days * 24 * 60 * 60 * 1000);
 
         this.logger.info(`Target period: ${new Date(startTime).toISOString()} to ${new Date(endTime).toISOString()}`);
 
-        await this.ensureDataAvailable(symbol, '5m', startTime, endTime);
-        await this.ensureDataAvailable(symbol, '1m', startTime, endTime);
+        // Скачиваем/Проверяем данные с УМНЫМ RESUME
+        const candles5m = await this.fetchHistoricalData(symbol, '5m', startTime, endTime);
+        const candles1m = await this.fetchHistoricalData(symbol, '1m', startTime, endTime);
 
-        this.logger.info('Loading verified data from DB...');
-        const candles5m = await this.candleRepo.getCandles(symbol, '5m', startTime, endTime);
-        const candles1m = await this.candleRepo.getCandles(symbol, '1m', startTime, endTime);
-
-        this.logger.info(`Loaded for Simulation: ${candles5m.length} (5m) and ${candles1m.length} (1m) candles`);
+        this.logger.info(`Ready for simulation. Loaded: ${candles5m.length} (5m) and ${candles1m.length} (1m)`);
 
         if (candles5m.length === 0 || candles1m.length === 0) {
-            throw new Error('Failed to load data for backtest even after synchronization attempt');
+            throw new Error('No data found for backtest');
         }
 
         return this.runSimulation(symbol, candles5m, candles1m, config.initialBalance);
     }
 
-    private async ensureDataAvailable(
-        symbol: string,
-        timeframe: string,
-        requiredStart: number,
-        requiredEnd: number
-    ): Promise<void> {
-        const dbRange = await this.candleRepo.getDataRange(symbol, timeframe);
-        
-        // Упрощенная логика: если есть хоть малейшая нехватка или разрыв - качаем всё (для надежности)
-        // В продакшене тут можно сделать умную докачку только недостающих кусков.
-        let needsDownload = true;
-        
-        if (dbRange) {
-            const hasStart = dbRange.min <= requiredStart;
-            // Допускаем задержку в 1 час для "свежести" данных
-            const hasEnd = dbRange.max >= requiredEnd - 1000 * 60 * 60; 
-            
-            if (hasStart && hasEnd) {
-                this.logger.info(`Data for ${timeframe} exists in DB and covers range.`);
-                needsDownload = false;
-            }
-        }
-
-        if (needsDownload) {
-            await this.downloadHistory(symbol, timeframe, requiredStart, requiredEnd);
-        }
-    }
-
-    private async downloadHistory(
-        symbol: string,
-        timeframe: string,
-        startTime: number,
-        endTime: number
-    ): Promise<void> {
-        this.logger.info(`Starting download for ${symbol} ${timeframe}. Optimized mode.`);
-        
+    private async fetchHistoricalData(symbol: string, timeframe: string, start: number, end: number): Promise<Candle[]> {
         const timeframeMs = this.getTimeframeMs(timeframe);
-        let currentCursor = endTime;
+        const expectedCount = Math.floor((end - start) / timeframeMs);
         
-        // ОПТИМИЗАЦИЯ 1: Лимит 1000 (максимум для Bybit)
-        const BATCH_LIMIT = 1000; 
+        // 1. Считаем, сколько есть
+        const dbCount = await this.candleRepo.countInRange(symbol, timeframe, start, end);
+
+        // Если данных достаточно (> 95%), просто возвращаем их
+        if (dbCount >= expectedCount * 0.95) {
+            this.logger.info(`Data for ${timeframe} found in DB (${dbCount} candles). Loading...`);
+            return await this.candleRepo.getCandles(symbol, timeframe, start, end);
+        }
+
+        // 2. Если данных мало, определяем точку старта (RESUME)
+        let curr = start;
         
-        let prevBatchOldestTimestamp: number | null = null; 
+        // Спрашиваем базу: "Какая у тебя последняя свеча?"
+        const lastInDb = await this.candleRepo.getLastCandle(symbol, timeframe);
+        
+        if (lastInDb && lastInDb.timestamp >= start && lastInDb.timestamp < end) {
+            this.logger.info(`Resuming ${timeframe} download from ${new Date(lastInDb.timestamp).toISOString()} (Found ${dbCount} candles)`);
+            curr = lastInDb.timestamp + 1; // Продолжаем со следующей мс
+        } else {
+            this.logger.info(`Starting new download for ${timeframe}...`);
+        }
 
-        while (currentCursor > startTime) {
-            try {
-                const candles = await this.dataFeed.getCandles(symbol, timeframe, BATCH_LIMIT, currentCursor);
+        // 3. Цикл скачивания (Forward Fill)
+        const allNewCandles: Candle[] = [];
+        const LIMIT = 1000;
 
-                if (candles.length === 0) {
-                    this.logger.warn('Received empty batch from API. Stopping download.');
-                    break;
-                }
+        while (curr < end) {
+            const batch = await this.dataFeed.getCandles(symbol, timeframe, LIMIT, curr);
+            
+            if (!batch.length) break;
 
-                const batchOldest = candles[0].timestamp;
-                const batchNewest = candles[candles.length - 1].timestamp;
-
-                this.validateBatchContinuity(candles, timeframeMs);
-
-                if (prevBatchOldestTimestamp !== null) {
-                    const expectedTimestamp = prevBatchOldestTimestamp - timeframeMs;
-                    if (batchNewest !== expectedTimestamp) {
-                        const gapSize = (prevBatchOldestTimestamp - batchNewest) / timeframeMs;
-                        // Логируем как Debug, чтобы не спамить в консоль, если гэпы частые
-                        this.logger.debug(`Potential gap detected: missing ~${gapSize - 1} candles.`);
-                    }
-                }
-
-                await this.candleRepo.saveCandles(candles);
-                
-                this.logger.info(`Saved ${candles.length} candles. cursor: ${new Date(batchOldest).toISOString()}`);
-
-                prevBatchOldestTimestamp = batchOldest;
-                currentCursor = batchOldest - 1; 
-
-                if (candles.length < BATCH_LIMIT && currentCursor > startTime) {
-                    this.logger.warn('Exchange returned fewer candles than limit. End of available history?');
-                    break;
-                }
-
-                // ОПТИМИЗАЦИЯ 2: Уменьшаем задержку. 20ms достаточно для Bybit.
-                await this.sleep(20);
-
-            } catch (error) {
-                this.logger.error('Error fetching history batch', error);
-                throw error;
+            await this.candleRepo.saveCandles(batch);
+            
+            allNewCandles.push(...batch);
+            const lastTimestamp = batch[batch.length - 1].timestamp;
+            
+            // Лог прогресса
+            const progress = ((lastTimestamp - start) / (end - start)) * 100;
+            if (Math.random() > 0.9) {
+                process.stdout.write(`\rDownloading ${timeframe}: ${progress.toFixed(1)}%...`);
             }
+
+            if (lastTimestamp >= end) break;
+            
+            curr = lastTimestamp + 1;
+            await this.sleep(50); // Лимиты API
         }
         
-        this.logger.info(`Download complete for ${timeframe}`);
-    }
-
-    private validateBatchContinuity(candles: Candle[], intervalMs: number): void {
-        for (let i = 0; i < candles.length - 1; i++) {
-            const current = candles[i];
-            const next = candles[i + 1];
-            
-            // Проверяем разницу между соседями
-            const diff = next.timestamp - current.timestamp;
-            
-            if (diff !== intervalMs) {
-                // Если разница не равна интервалу (с допуском 1мс на всякий случай)
-                if (Math.abs(diff - intervalMs) > 1) {
-                    const missingCount = (diff / intervalMs) - 1;
-                    this.logger.warn(`GAP INSIDE BATCH: ${new Date(current.timestamp).toISOString()} -> ${new Date(next.timestamp).toISOString()}. Missing ${missingCount} candles.`);
-                }
-            }
-        }
+        console.log(''); // New line
+        this.logger.info(`Download finished. Added ${allNewCandles.length} new candles.`);
+        
+        // Возвращаем полный набор из базы
+        return await this.candleRepo.getCandles(symbol, timeframe, start, end);
     }
 
     private getTimeframeMs(tf: string): number {
@@ -175,49 +125,54 @@ export class RunBacktest {
         if (tf.includes('m')) return value * 60 * 1000;
         if (tf.includes('h')) return value * 60 * 60 * 1000;
         if (tf.includes('d')) return value * 24 * 60 * 60 * 1000;
-        
-        // Если пришло "5" или "1" (как для Bybit API) считаем это минутами
         return value * 60 * 1000;
     }
 
-    private async runSimulation(
-        symbol: string,
-        candles5m: Candle[],
-        candles1m: Candle[],
-        initialBalance: number
-    ): Promise<BacktestResult> {
+    private async runSimulation(symbol: string, candles5m: Candle[], candles1m: Candle[], initialBalance: number): Promise<BacktestResult> {
         let idx5m = 0;
         let idx1m = 0;
+        let currentPnl = 0;
 
         if (candles5m.length < 70) return { totalTrades: 0, winRate: 0, totalPnl: 0, winningTrades: 0, losingTrades: 0, finalBalance: initialBalance, maxDrawdown: 0 };
         idx5m = 70;
-        
         const startTimestamp = candles5m[idx5m].timestamp;
-        
         idx1m = candles1m.findIndex(c => c.timestamp >= startTimestamp);
         if (idx1m === -1) idx1m = 0;
+
+        let lastLoggedPercent = 0;
 
         while (idx5m < candles5m.length && idx1m < candles1m.length) {
             const current5mList = candles5m.slice(0, idx5m + 1);
             const current1mList = candles1m.slice(0, idx1m + 1);
-            
             const current5mTime = candles5m[idx5m].timestamp;
             const current1mTime = candles1m[idx1m].timestamp;
 
+            const progress = Math.floor((idx5m / candles5m.length) * 100);
+            if (progress > lastLoggedPercent && progress % 10 === 0) {
+                const date = new Date(current5mTime).toISOString().split('T')[0];
+                this.logger.info(`Simulation: ${progress}% (${date})`);
+                lastLoggedPercent = progress;
+            }
+
+            const currentBalance = initialBalance + currentPnl;
+
             if (current1mTime < current5mTime) {
-                await this.strategy.processTick(symbol, current5mList, current1mList);
+                await this.strategy.processTick(symbol, current5mList, current1mList, currentBalance);
                 idx1m++;
             } else {
-                await this.strategy.processTick(symbol, current5mList, current1mList);
+                await this.strategy.processTick(symbol, current5mList, current1mList, currentBalance);
                 idx5m++;
                 while(idx1m < candles1m.length && candles1m[idx1m].timestamp <= candles5m[idx5m]?.timestamp) {
                      idx1m++;
+                }
+                if (idx5m % 24 === 0) { 
+                    const stats = await this.tradeRepo.getTradeStats(symbol);
+                    currentPnl = stats.totalPnl;
                 }
             }
         }
 
         const stats = await this.tradeRepo.getTradeStats(symbol);
-        
         return {
             totalTrades: stats.total,
             winningTrades: stats.wins,

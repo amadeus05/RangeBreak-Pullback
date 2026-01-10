@@ -4,6 +4,24 @@ import { Candle } from '../../../domain/entities/Candle';
 
 @injectable()
 export class IndicatorEngine implements IIndicatorEngine {
+    
+     calculateEMA(candles: Candle[], period: number): number {
+        if (candles.length === 0) return 0;
+        
+        // Коэффициент сглаживания
+        const k = 2 / (period + 1);
+        
+        // Начинаем с первой цены (как начальное значение)
+        let ema = candles[0].close;
+        
+        // Проходим по всем свечам, обновляя EMA
+        for (let i = 1; i < candles.length; i++) {
+            ema = (candles[i].close * k) + (ema * (1 - k));
+        }
+        
+        return ema;
+    }
+
     calculateATR(candles: Candle[], period: number = 14): number {
         if (candles.length < period + 1) return 0;
 

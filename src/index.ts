@@ -17,7 +17,7 @@ async function main() {
         else {
             // По умолчанию запускаем Backtest
             const symbol = args[1] || 'BTCUSDT';
-            const days = parseInt(args[2]) || 7; // 360 дней по умолчанию
+            const days = parseInt(args[2]) || 180; // 360 дней по умолчанию
 
             logger.info(`Starting BACKTEST for ${symbol} (last ${days} days)...`);
             if (!mode) {
