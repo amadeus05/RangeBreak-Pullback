@@ -12,12 +12,27 @@ import { MarketRange } from '../../domain/value-objects/MarketRange';
 import { BreakoutSignal } from '../../domain/value-objects/BreakoutSignal';
 import { StrategyState } from '../../domain/enums/StrategyState';
 import { TYPES } from '../../config/inversify.config';
+import { Logger } from '../../shared/logger/Logger';
+
+// ИНКАПСУЛЯЦИЯ ДАННЫХ (Problem: Strategy Context)
+interface StrategyContext {
+    range: MarketRange | null;
+    breakout: BreakoutSignal | null;
+    lastProcessedBar5m: number;
+    indicators: {
+        atr: number;
+        adx: number;
+        volumeSMA: number;
+    };
+}
 
 @injectable()
 export class RangeBreakPullbackStrategy {
-    private currentRange: MarketRange | null = null;
-    private currentBreakout: BreakoutSignal | null = null;
-    private pullbackStartTime: number | null = null;
+    private logger = Logger.getInstance();
+    
+    // Единый источник истины для данных сетапа
+    private ctx: StrategyContext = this.getDefaultContext();
+
     private dailyLoss: number = 0;
     private consecutiveLosses: number = 0;
     
@@ -32,123 +47,131 @@ export class RangeBreakPullbackStrategy {
         @inject(TYPES.IStateMachine) private readonly stateMachine: IStateMachine
     ) {}
 
-    async processTick(symbol: string, candles5m: Candle[], candles1m: Candle[]): Promise<void> {
-        const currentState = this.stateMachine.getCurrentState();
-
-        // Global kill switch check
-        const balance = 10000; // TODO: get from exchange
-        if (!this.riskEngine.canTrade(balance, this.dailyLoss, this.consecutiveLosses)) {
-            this.stateMachine.transition(StrategyState.RESET, 'Kill switch activated');
-            return;
-        }
-        
-        switch (currentState) {
-            case StrategyState.IDLE:
-                await this.handleIdleState(candles5m);
-                break;
-            
-            case StrategyState.RANGE_DEFINED:
-                await this.handleRangeDefinedState(candles5m);
-                break;
-            
-            case StrategyState.BREAKOUT_DETECTED:
-                await this.handleBreakoutDetectedState();
-                break;
-            
-            case StrategyState.WAIT_PULLBACK:
-                await this.handleWaitPullbackState(candles1m, candles5m);
-                break;
-            
-            case StrategyState.ENTRY_PLACED:
-                // Wait for order fill - handled by execution engine
-                break;
-            
-            case StrategyState.IN_POSITION:
-                // Monitor position - handled by position manager
-                break;
-            
-            case StrategyState.RESET:
-                this.handleResetState();
-                break;
-        }
+    private getDefaultContext(): StrategyContext {
+        return {
+            range: null,
+            breakout: null,
+            lastProcessedBar5m: 0,
+            indicators: { atr: 0, adx: 0, volumeSMA: 0 }
+        };
     }
 
-    private async handleIdleState(candles5m: Candle[]): Promise<void> {
-        const marketValid = this.marketFilter.isMarketValid(candles5m);
-        
-        if (marketValid) {
+    async processTick(symbol: string, candles5m: Candle[], candles1m: Candle[]): Promise<void> {
+        // --- 1. KILL SWITCH (Highest Priority - Problem #3) ---
+        const balance = 10000; // TODO: Get from exchange
+        if (!this.riskEngine.canTrade(balance, this.dailyLoss, this.consecutiveLosses)) {
+            if (this.stateMachine.getCurrentState() !== StrategyState.IDLE) {
+                this.forceReset('CRITICAL: Kill Switch triggered');
+            }
+            return;
+        }
+
+        const currentState = this.stateMachine.getCurrentState();
+        const last5m = candles5m[candles5m.length - 1];
+
+        // --- 2. TIMEOUTS & MONITORING ---
+        this.checkTimeouts();
+
+        // --- 3. 5m BRAIN (Structure & State Transitions) ---
+        if (last5m.timestamp > this.ctx.lastProcessedBar5m) {
+            await this.handleHighTimeframeLogic(candles5m);
+            this.ctx.lastProcessedBar5m = last5m.timestamp;
+        }
+
+        // --- 4. 1m HANDS (Execution Confirmation) ---
+        await this.handleLowTimeframeLogic(candles1m);
+    }
+
+    private async handleHighTimeframeLogic(candles5m: Candle[]): Promise<void> {
+        const state = this.stateMachine.getCurrentState();
+
+        // ONE SETUP AT A TIME (Problem: Explicit blockade)
+        if (state !== StrategyState.IDLE && state !== StrategyState.RANGE_DEFINED) return;
+
+        if (state === StrategyState.IDLE) {
+            if (!this.marketFilter.isMarketValid(candles5m)) return;
+
             const range = this.rangeDetector.detectRange(candles5m);
             const atr = this.indicatorEngine.calculateATR(candles5m, 14);
             
             if (range && this.rangeDetector.isRangeValid(range, atr)) {
-                this.currentRange = range;
-                this.stateMachine.transition(StrategyState.RANGE_DEFINED, 'Valid range detected');
+                this.ctx.range = range;
+                this.ctx.indicators.atr = atr;
+                this.logStateSnapshot(StrategyState.RANGE_DEFINED, 'New Range Found');
+                this.stateMachine.transition(StrategyState.RANGE_DEFINED, 'Range Frozen');
+            }
+            return;
+        }
+
+        if (state === StrategyState.RANGE_DEFINED) {
+            if (!this.ctx.range) return;
+
+            const last5m = candles5m[candles5m.length - 1];
+            const volumeSMA = this.indicatorEngine.calculateSMA(candles5m.map(c => c.volume), 20);
+            
+            const breakout = this.breakoutDetector.detectBreakout(
+                last5m, 
+                this.ctx.range, 
+                this.ctx.indicators.atr, 
+                volumeSMA
+            );
+            
+            if (breakout) {
+                this.ctx.breakout = breakout;
+                this.ctx.indicators.volumeSMA = volumeSMA;
+                this.logStateSnapshot(StrategyState.BREAKOUT_DETECTED, 'Breakout Confirmed');
+                this.stateMachine.transition(StrategyState.BREAKOUT_DETECTED, '5m Breakout Confirmed');
+                this.stateMachine.transition(StrategyState.WAIT_PULLBACK, 'Handing over to 1m');
             }
         }
     }
 
-    private async handleRangeDefinedState(candles5m: Candle[]): Promise<void> {
-        if (!this.currentRange) {
-            this.stateMachine.transition(StrategyState.RESET, 'No range defined');
-            return;
-        }
-
-        const lastCandle = candles5m[candles5m.length - 1];
-        const atr = this.indicatorEngine.calculateATR(candles5m, 14);
-        const volumes = candles5m.map(c => c.volume);
-        const volumeSMA = this.indicatorEngine.calculateSMA(volumes, 20);
-
-        const breakout = this.breakoutDetector.detectBreakout(lastCandle, this.currentRange, atr, volumeSMA);
-        
-        if (breakout) {
-            this.currentBreakout = breakout;
-            this.stateMachine.transition(StrategyState.BREAKOUT_DETECTED, `Breakout detected: ${breakout.direction}`);
-        }
-    }
-
-    private async handleBreakoutDetectedState(): Promise<void> {
-        this.pullbackStartTime = Date.now();
-        this.stateMachine.transition(StrategyState.WAIT_PULLBACK, 'Waiting for pullback');
-    }
-
-    private async handleWaitPullbackState(candles1m: Candle[], candles5m: Candle[]): Promise<void> {
-        if (!this.currentBreakout || !this.currentRange) {
-            this.stateMachine.transition(StrategyState.RESET, 'Missing breakout or range data');
-            return;
-        }
-
-        // Timeout check: 10 candles * 1m = 10 minutes
-        const elapsed = Date.now() - (this.pullbackStartTime || 0);
-        if (elapsed > 10 * 60 * 1000) {
-            this.stateMachine.transition(StrategyState.RESET, 'Pullback timeout');
-            return;
-        }
+    private async handleLowTimeframeLogic(candles1m: Candle[]): Promise<void> {
+        if (this.stateMachine.getCurrentState() !== StrategyState.WAIT_PULLBACK) return;
 
         const vwap = this.indicatorEngine.calculateVWAP(candles1m);
-        const lastCandle = candles1m[candles1m.length - 1];
+        const last1m = candles1m[candles1m.length - 1];
 
         const pullbackValid = this.pullbackValidator.isPullbackValid(
             candles1m,
-            this.currentBreakout,
-            this.currentRange,
+            this.ctx.breakout!,
+            this.ctx.range!,
             vwap
         );
 
-        const hasPattern = this.pullbackValidator.hasPullbackPattern(
-            lastCandle,
-            this.currentBreakout.direction
-        );
-
-        if (pullbackValid && hasPattern) {
-            this.stateMachine.transition(StrategyState.ENTRY_PLACED, 'Valid pullback with pattern');
-            // TODO: Place LIMIT order via exchange
+        if (pullbackValid && this.pullbackValidator.hasPullbackPattern(last1m, this.ctx.breakout!.direction)) {
+            this.logStateSnapshot(StrategyState.ENTRY_PLACED, 'Pullback Entry Triggered');
+            this.stateMachine.transition(StrategyState.ENTRY_PLACED, 'Pattern confirmed on 1m');
+            // TODO: call ExecutionEngine.placeOrder()
         }
     }
 
-    private handleResetState(): void {
-        this.currentRange = null;
-        this.currentBreakout = null;
-        this.pullbackStartTime = null;
-        this.stateMachine.transition(StrategyState.IDLE, 'Reset complete');
+    private checkTimeouts(): void {
+        const state = this.stateMachine.getCurrentState();
+        if (state === StrategyState.IDLE) return;
+
+        const timeInState = this.stateMachine.getTimeInState();
+
+        if (state === StrategyState.WAIT_PULLBACK && timeInState > 15 * 60 * 1000) {
+            this.forceReset('Pullback timeout');
+        }
+    }
+
+    // SNAPSHOT LOGGING (Problem #4)
+    private logStateSnapshot(newState: StrategyState, reason: string): void {
+        this.logger.info(`[STRATEGY SNAPSHOT] Transition to ${newState}`, {
+            reason,
+            range: this.ctx.range ? { h: this.ctx.range.high, l: this.ctx.range.low } : 'null',
+            breakout: this.ctx.breakout ? { dir: this.ctx.breakout.direction, price: this.ctx.breakout.price } : 'null',
+            atr: this.ctx.indicators.atr,
+            volSMA: this.ctx.indicators.volumeSMA,
+            timeInPrevState: this.stateMachine.getTimeInState()
+        });
+    }
+
+    private forceReset(reason: string): void {
+        this.ctx = this.getDefaultContext(); // Полная очистка контекста (Problem #5)
+        this.stateMachine.reset();
+        this.logger.warn(`Strategy Reset: ${reason}`);
     }
 }

@@ -5,4 +5,5 @@ export interface IStateMachine {
     transition(newState: StrategyState, reason: string): void;
     canTransition(newState: StrategyState): boolean;
     reset(): void;
+    getTimeInState(): number; // Новый метод для контроля таймаутов
 }

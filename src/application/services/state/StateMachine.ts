@@ -12,19 +12,21 @@ interface StateTransition {
 export class StateMachine implements IStateMachine {
     private currentState: StrategyState = StrategyState.IDLE;
     private stateHistory: StateTransition[] = [];
+    private lastTransitionTime: number = Date.now();
 
     getCurrentState(): StrategyState {
         return this.currentState;
     }
 
+    getTimeInState(): number {
+        return Date.now() - this.lastTransitionTime;
+    }
+
     transition(newState: StrategyState, reason: string): void {
         if (!this.canTransition(newState)) {
-            console.warn(`Invalid transition from ${this.currentState} to ${newState}`);
             return;
         }
 
-        console.log(`State transition: ${this.currentState} → ${newState} (${reason})`);
-        
         this.stateHistory.push({
             state: this.currentState,
             timestamp: Date.now(),
@@ -32,6 +34,9 @@ export class StateMachine implements IStateMachine {
         });
 
         this.currentState = newState;
+        this.lastTransitionTime = Date.now();
+        
+        console.log(`[STATE] ${this.currentState} | Reason: ${reason}`);
     }
 
     canTransition(newState: StrategyState): boolean {
@@ -52,9 +57,5 @@ export class StateMachine implements IStateMachine {
     reset(): void {
         this.transition(StrategyState.RESET, 'Manual reset');
         this.transition(StrategyState.IDLE, 'Reset complete');
-    }
-
-    getHistory(): StateTransition[] {
-        return [...this.stateHistory];
     }
 }
