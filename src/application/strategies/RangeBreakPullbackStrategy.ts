@@ -11,7 +11,7 @@ import { Candle } from '../../domain/entities/Candle';
 import { MarketRange } from '../../domain/value-objects/MarketRange';
 import { BreakoutSignal } from '../../domain/value-objects/BreakoutSignal';
 import { StrategyState } from '../../domain/enums/StrategyState';
-import { TYPES } from '../../config/inversify.config';
+import { TYPES } from '../../config/types';
 import { Logger } from '../../shared/logger/Logger';
 
 // ИНКАПСУЛЯЦИЯ ДАННЫХ (Problem: Strategy Context)

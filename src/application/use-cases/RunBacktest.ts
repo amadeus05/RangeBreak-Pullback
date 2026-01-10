@@ -5,7 +5,7 @@ import { CandleRepository } from '../../infrastructure/database/repositories/Can
 import { TradeRepository } from '../../infrastructure/database/repositories/TradeRepository';
 import { Candle } from '../../domain/entities/Candle';
 import { Logger } from '../../shared/logger/Logger';
-import { TYPES } from '../../config/inversify.config';
+import { TYPES } from '../../config/types';
 
 export interface BacktestConfig {
     symbol: string;

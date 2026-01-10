@@ -1,4 +1,5 @@
-import { createContainer, TYPES } from '../../config/inversify.config';
+import { createContainer } from '../../config/inversify.config';
+import { TYPES } from '../../config/types';
 import { RunBacktest, BacktestConfig } from '../../application/use-cases/RunBacktest';
 import { CandleRepository } from '../../infrastructure/database/repositories/CandleRepository';
 import { TradeRepository } from '../../infrastructure/database/repositories/TradeRepository';

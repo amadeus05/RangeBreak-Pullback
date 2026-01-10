@@ -2,7 +2,7 @@ import { injectable, inject } from 'inversify';
 import { IMarketRegimeFilter } from '../../../domain/interfaces/IMarketRegimeFilter';
 import { IIndicatorEngine } from '../../../domain/interfaces/IIndicatorEngine';
 import { Candle } from '../../../domain/entities/Candle';
-import { TYPES } from '../../../config/inversify.config';
+import { TYPES } from '../../../config/types';
 
 @injectable()
 export class MarketRegimeFilter implements IMarketRegimeFilter {

@@ -3,7 +3,7 @@ import { RangeBreakPullbackStrategy } from '../strategies/RangeBreakPullbackStra
 import { IExchange } from '../../domain/interfaces/IExchange';
 import { Candle } from '../../domain/entities/Candle';
 import { Logger } from '../../shared/logger/Logger';
-import { TYPES } from '../../config/inversify.config';
+import { TYPES } from '../../config/types';
 
 export interface LiveTradingConfig {
     symbol: string;
