@@ -11,21 +11,41 @@ export class CandleRepository {
     }
 
     async saveCandles(candles: Candle[]): Promise<void> {
-        const data = candles.map(c => ({
-            timestamp: BigInt(c.timestamp),
-            symbol: c.symbol,
-            timeframe: c.timeframe,
-            open: c.open,
-            high: c.high,
-            low: c.low,
-            close: c.close,
-            volume: c.volume
-        }));
+        if (candles.length === 0) return;
 
-        await this.prisma.candle.createMany({
-            data,
-            skipDuplicates: true 
-        }); 
+        const symbol = candles[0].symbol;
+        const timeframe = candles[0].timeframe;
+
+        // 1. Находим самую свежую свечу для этого символа в базе
+        const lastCandle = await this.prisma.candle.findFirst({
+            where: { symbol, timeframe },
+            orderBy: { timestamp: 'desc' },
+            select: { timestamp: true }
+        });
+
+        const lastTimestamp = lastCandle?.timestamp ?? -1n;
+
+        // 2. Оставляем только те свечи, которых еще нет в базе (чей TS больше последнего в базе)
+        const dataToInsert = candles
+            .map(c => ({
+                timestamp: BigInt(c.timestamp),
+                symbol: c.symbol,
+                timeframe: c.timeframe,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close,
+                volume: c.volume
+            }))
+            .filter(c => c.timestamp > lastTimestamp);
+
+        // 3. Вставляем только новые данные
+        if (dataToInsert.length > 0) {
+            await this.prisma.candle.createMany({
+                data: dataToInsert
+                // skipDuplicates удаляем, он здесь больше не нужен
+            });
+        }
     }
 
     async getCandles(
