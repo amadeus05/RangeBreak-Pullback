@@ -20,14 +20,23 @@ interface StrategyContext {
     range: MarketRange | null;
     breakout: BreakoutSignal | null;
     lastProcessedBar5m: number;
-    // ВАЖНО: Время входа в текущий статус (по свечам)
-    stateEnterTimestamp: number; 
+    stateEnterTimestamp: number;
     indicators: {
         atr: number;
         adx: number;
         volumeSMA: number;
     };
     activeTradeId: number | null;
+    
+    pendingLimitOrder: {
+        price: number;
+        stopLoss: number;
+        takeProfit: number;
+        size: number;
+        direction: TradeDirection;
+        timestamp: number;
+    } | null;
+    
     tradeParams: {
         entryPrice: number;
         stopLoss: number;
@@ -74,7 +83,8 @@ export class RangeBreakPullbackStrategy {
             stateEnterTimestamp: 0, // Инициализация
             indicators: { atr: 0, adx: 0, volumeSMA: 0 },
             activeTradeId: null,
-            tradeParams: null
+            tradeParams: null,
+            pendingLimitOrder: null
         };
     }
 
@@ -100,13 +110,19 @@ export class RangeBreakPullbackStrategy {
 
         const currentState = this.stateMachine.getCurrentState();
 
-        // 2. ТАЙМАУТЫ (Теперь передаем время свечи!)
+        // 2. ТАЙМАУТЫ
         this.checkTimeouts(last1m.timestamp);
 
         // 3. УПРАВЛЕНИЕ ПОЗИЦИЕЙ
         if (currentState === StrategyState.IN_POSITION) {
             await this.managePosition(last1m);
             return; 
+        }
+
+        // ← НОВОЕ: Проверка лимитных ордеров
+        if (currentState === StrategyState.LIMIT_ORDER_PLACED) {
+            await this.checkLimitOrderFill(last1m);
+            return;
         }
 
         // 4. 5m ЛОГИКА
@@ -205,25 +221,204 @@ export class RangeBreakPullbackStrategy {
     }
 
     private async handleLowTimeframeLogic(candles1m: Candle[], balance: number): Promise<void> {
-        if (this.stateMachine.getCurrentState() !== StrategyState.WAIT_PULLBACK) return;
-
-        const vwap = this.indicatorEngine.calculateVWAP(candles1m);
+        const state = this.stateMachine.getCurrentState();
         const last1m = candles1m[candles1m.length - 1];
 
-        const pullbackValid = this.pullbackValidator.isPullbackValid(
-            candles1m,
-            this.ctx.breakout!,
-            this.ctx.range!,
-            vwap
+        // ═══ ЭТАП 1: ЖДЕМ ОТКАТА → СТАВИМ ЛИМИТНИК ═══
+        if (state === StrategyState.WAIT_PULLBACK) {
+            const vwap = this.indicatorEngine.calculateVWAP(candles1m);
+            
+            const pullbackValid = this.pullbackValidator.isPullbackValid(
+                candles1m,
+                this.ctx.breakout!,
+                this.ctx.range!,
+                vwap
+            );
+
+            if (pullbackValid) {
+                await this.placeLimitOrder(last1m, balance, vwap);
+            }
+            return;
+        }
+
+        // ═══ ЭТАП 2: ЛИМИТНИК РАЗМЕЩЕН → ЖДЕМ ИСПОЛНЕНИЯ ═══
+        if (state === StrategyState.LIMIT_ORDER_PLACED) {
+            await this.checkLimitOrderFill(last1m);
+            return;
+        }
+    }
+
+    private async checkLimitOrderFill(currentCandle: Candle): Promise<void> {
+        if (!this.ctx.pendingLimitOrder) return;
+
+        const { price, stopLoss, takeProfit, size, direction } = this.ctx.pendingLimitOrder;
+        const { high, low, timestamp } = currentCandle;
+
+        // ══════════════════════════════════════════
+        // Проверяем, коснулась ли цена лимитника
+        // ══════════════════════════════════════════
+        
+        let filled = false;
+
+        if (direction === TradeDirection.LONG) {
+            // Для LONG: цена должна упасть ДО лимитника
+            if (low <= price) {
+                filled = true;
+            }
+        } else {
+            // Для SHORT: цена должна подняться ДО лимитника
+            if (high >= price) {
+                filled = true;
+            }
+        }
+
+        if (!filled) {
+            // Проверяем таймаут (если лимитник висит > 2 часов)
+            const timeDiff = timestamp - this.ctx.stateEnterTimestamp;
+            if (timeDiff > 120 * 60 * 1000) {
+                this.logger.info('[LIMIT ORDER] Expired (timeout 2h)');
+                this.forceReset('Limit order timeout');
+            }
+            return;
+        }
+
+        // ══════════════════════════════════════════
+        // Лимитник исполнен → открываем позицию
+        // ══════════════════════════════════════════
+        
+        let fillPrice = price;
+        
+        // Учитываем проскальзывание (хотя на лимитнике его меньше)
+        if (direction === TradeDirection.LONG) {
+            fillPrice = fillPrice * (1 + this.SLIPPAGE * 0.5); // 50% от обычного slippage
+        } else {
+            fillPrice = fillPrice * (1 - this.SLIPPAGE * 0.5);
+        }
+
+        // Сохраняем параметры сделки
+        this.ctx.tradeParams = {
+            entryPrice: fillPrice,
+            stopLoss,
+            takeProfit,
+            size,
+            direction
+        };
+
+        // Записываем в БД
+        const tradeId = await this.tradeRepo.saveTrade({
+            id: 0,
+            symbol: currentCandle.symbol,
+            direction,
+            entryTime: timestamp,
+            entryPrice: fillPrice,
+            size,
+            stopLoss,
+            takeProfit,
+            status: 'OPEN'
+        });
+
+        this.ctx.activeTradeId = tradeId;
+        this.ctx.pendingLimitOrder = null; // Очищаем
+
+        const dateStr = new Date(timestamp).toISOString();
+        this.logger.info(
+            `[${dateStr}] [LIMIT FILLED] Entry ${direction} @ ${fillPrice.toFixed(2)} ` +
+            `| SL: ${stopLoss.toFixed(2)} | TP: ${takeProfit.toFixed(2)}`
         );
 
-        // Входим при касании зоны (Touch Trade)
-        if (pullbackValid) {
-            this.logStateSnapshot(StrategyState.ENTRY_PLACED, 'Pullback Zone Hit');
-            this.stateMachine.transition(StrategyState.ENTRY_PLACED, 'Touch trade');
+        this.stateMachine.transition(StrategyState.IN_POSITION, 'Limit order filled');
+        this.ctx.stateEnterTimestamp = timestamp;
+    }
+    
+    private async placeLimitOrder(
+        triggerCandle: Candle, 
+        balance: number,
+        vwap: number
+    ): Promise<void> {
+        if (!this.ctx.breakout || !this.ctx.range) return;
+
+        const direction = this.ctx.breakout.direction;
+        
+        // ══════════════════════════════════════════
+        // КЛЮЧЕВАЯ ЛОГИКА: Цена входа ВНУТРИ зоны
+        // ══════════════════════════════════════════
+        
+        let limitPrice: number;
+        
+        if (direction === TradeDirection.LONG) {
+            // Лимитник на 0.1-0.2% НИЖЕ Range High / VWAP
+            const targetLevel = Math.max(this.ctx.range.high, vwap);
+            limitPrice = targetLevel * 0.998; // -0.2%
             
-            await this.executeEntry(last1m, balance);
+        } else {
+            // Лимитник на 0.1-0.2% ВЫШЕ Range Low / VWAP
+            const targetLevel = Math.min(this.ctx.range.low, vwap);
+            limitPrice = targetLevel * 1.002; // +0.2%
         }
+
+        // ══════════════════════════════════════════
+        // Расчет стопа и тейка
+        // ══════════════════════════════════════════
+        
+        const atrBuffer = this.ctx.indicators.atr * 0.4;
+        const MIN_STOP_PERCENT = 0.005;
+        
+        let stopLoss: number;
+        let stopDistance: number;
+        
+        if (direction === TradeDirection.LONG) {
+            stopLoss = limitPrice - atrBuffer;
+            stopDistance = limitPrice - stopLoss;
+            
+            const minStopDistance = limitPrice * MIN_STOP_PERCENT;
+            if (stopDistance < minStopDistance) {
+                stopDistance = minStopDistance;
+                stopLoss = limitPrice - stopDistance;
+            }
+            
+        } else {
+            stopLoss = limitPrice + atrBuffer;
+            stopDistance = stopLoss - limitPrice;
+            
+            const minStopDistance = limitPrice * MIN_STOP_PERCENT;
+            if (stopDistance < minStopDistance) {
+                stopDistance = minStopDistance;
+                stopLoss = limitPrice + stopDistance;
+            }
+        }
+
+        const RISK_REWARD = 2.5;
+        const takeProfit = direction === TradeDirection.LONG
+            ? limitPrice + (stopDistance * RISK_REWARD)
+            : limitPrice - (stopDistance * RISK_REWARD);
+
+        const size = this.riskEngine.calculatePositionSize(balance, stopDistance);
+
+        // ══════════════════════════════════════════
+        // Сохраняем параметры ордера
+        // ══════════════════════════════════════════
+        
+        this.ctx.pendingLimitOrder = {
+            price: limitPrice,
+            stopLoss,
+            takeProfit,
+            size,
+            direction,
+            timestamp: triggerCandle.timestamp
+        };
+
+        const dateStr = new Date(triggerCandle.timestamp).toISOString();
+        this.logger.info(
+            `[${dateStr}] [LIMIT ORDER] Placed ${direction} @ ${limitPrice.toFixed(2)} ` +
+            `| SL: ${stopLoss.toFixed(2)} | TP: ${takeProfit.toFixed(2)} | Size: ${size.toFixed(4)}`
+        );
+
+        this.stateMachine.transition(
+            StrategyState.LIMIT_ORDER_PLACED, 
+            'Limit order placed in pullback zone'
+        );
+        
+        this.ctx.stateEnterTimestamp = triggerCandle.timestamp;
     }
 
     private async executeEntry(triggerCandle: Candle, balance: number): Promise<void> {

@@ -44,8 +44,19 @@ export class StateMachine implements IStateMachine {
             [StrategyState.IDLE]: [StrategyState.RANGE_DEFINED],
             [StrategyState.RANGE_DEFINED]: [StrategyState.BREAKOUT_DETECTED, StrategyState.RESET],
             [StrategyState.BREAKOUT_DETECTED]: [StrategyState.WAIT_PULLBACK, StrategyState.RESET],
-            [StrategyState.WAIT_PULLBACK]: [StrategyState.ENTRY_PLACED, StrategyState.RESET],
-            [StrategyState.ENTRY_PLACED]: [StrategyState.IN_POSITION, StrategyState.RESET],
+            [StrategyState.WAIT_PULLBACK]: [
+                StrategyState.LIMIT_ORDER_PLACED,
+                StrategyState.ENTRY_PLACED,
+                StrategyState.RESET
+            ],
+            [StrategyState.LIMIT_ORDER_PLACED]: [
+                StrategyState.IN_POSITION,
+                StrategyState.RESET
+            ],
+            [StrategyState.ENTRY_PLACED]: [
+                StrategyState.IN_POSITION,
+                StrategyState.RESET
+            ],
             [StrategyState.IN_POSITION]: [StrategyState.EXIT, StrategyState.RESET],
             [StrategyState.EXIT]: [StrategyState.RESET],
             [StrategyState.RESET]: [StrategyState.IDLE]
