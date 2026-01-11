@@ -103,6 +103,7 @@ export class TradeRepository {
         losses: number;
         winRate: number;
         totalPnl: number;
+        profitFactor: number; // Добавили поле
     }> {
         const trades = await this.prisma.trade.findMany({
             where: {
@@ -113,11 +114,16 @@ export class TradeRepository {
 
         const total = trades.length;
         const wins = trades.filter(t => (t.pnl || 0) > 0).length;
-        const losses = trades.filter(t => (t.pnl || 0) < 0).length;
+        const losses = trades.filter(t => (t.pnl || 0) <= 0).length;
         const winRate = total > 0 ? (wins / total) * 100 : 0;
         const totalPnl = trades.reduce((sum, t) => sum + (t.pnl || 0), 0);
 
-        return { total, wins, losses, winRate, totalPnl };
+        // Считаем настоящий Profit Factor ($ Profit / $ Loss)
+        const grossProfit = trades.reduce((sum, t) => sum + ((t.pnl || 0) > 0 ? (t.pnl || 0) : 0), 0);
+        const grossLoss = trades.reduce((sum, t) => sum + ((t.pnl || 0) < 0 ? Math.abs(t.pnl || 0) : 0), 0);
+        const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 999 : 0);
+
+        return { total, wins, losses, winRate, totalPnl, profitFactor };
     }
 
     private toDomain(prismaTrade: PrismaTrade): TradeRecord {

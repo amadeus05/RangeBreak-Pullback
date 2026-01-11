@@ -13,7 +13,7 @@ import { IRiskEngine } from '../domain/interfaces/IRiskEngine';
 import { IStateMachine } from '../domain/interfaces/IStateMachine';
 
 // Implementations
-import { BybitExchangeAdapter } from '../infrastructure/exchanges/bybit/BybitExchangeAdapter';
+import { BinanceExchangeAdapter } from '../infrastructure/exchanges/binance/BinanceExchangeAdapter';
 import { PaperTradingExchange } from '../infrastructure/exchanges/paper-trading/PaperTradingExchange';
 import { IndicatorEngine } from '../application/services/indicators/IndicatorEngine';
 import { MarketRegimeFilter } from '../application/services/market/MarketRegimeFilter';
@@ -22,7 +22,7 @@ import { BreakoutDetector } from '../application/services/detection/BreakoutDete
 import { PullbackValidator } from '../application/services/validation/PullbackValidator';
 import { RiskEngine } from '../application/services/risk/RiskEngine';
 import { StateMachine } from '../application/services/state/StateMachine';
-import { RangeBreakPullbackStrategy } from '../application/strategies/RangeBreakPullbackStrategy';
+import { MeanReversionStrategy } from '../application/strategies/MeanReversionStrategy';
 
 // Repositories & UseCases (Обязательно импортируем!)
 import { CandleRepository } from '../infrastructure/database/repositories/CandleRepository';
@@ -43,7 +43,7 @@ export function createContainer(mode: 'backtest' | 'live'): Container {
     container.bind<IPullbackValidator>(TYPES.IPullbackValidator).to(PullbackValidator);
     container.bind<IRiskEngine>(TYPES.IRiskEngine).to(RiskEngine);
     container.bind<IStateMachine>(TYPES.IStateMachine).to(StateMachine).inSingletonScope();
-    container.bind<RangeBreakPullbackStrategy>(TYPES.Strategy).to(RangeBreakPullbackStrategy);
+    container.bind<MeanReversionStrategy>(TYPES.Strategy).to(MeanReversionStrategy);
 
     // --- Repositories ---
     // Регистрируем репозитории, чтобы UseCase мог их получить
@@ -52,14 +52,14 @@ export function createContainer(mode: 'backtest' | 'live'): Container {
 
     // --- Exchanges Setup ---
     // 1. DataFeed: Всегда Bybit (для данных)
-    container.bind<IExchange>(TYPES.IDataFeed).to(BybitExchangeAdapter).inSingletonScope();
+    container.bind<IExchange>(TYPES.IDataFeed).to(BinanceExchangeAdapter).inSingletonScope();
 
     // 2. Execution Exchange: Зависит от режима
     if (mode === 'backtest') {
         container.bind<IExchange>(TYPES.IExchange).to(PaperTradingExchange).inSingletonScope();
         container.bind<RunBacktest>(RunBacktest).toSelf(); 
     } else {
-        container.bind<IExchange>(TYPES.IExchange).to(BybitExchangeAdapter).inSingletonScope();
+        container.bind<IExchange>(TYPES.IExchange).to(BinanceExchangeAdapter).inSingletonScope();
         
         // Для Live режима регистрируем RunLiveTrading
         container.bind<RunLiveTrading>(RunLiveTrading).toSelf();

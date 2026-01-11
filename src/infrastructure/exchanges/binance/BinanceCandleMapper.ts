@@ -18,17 +18,23 @@ export class BinanceCandleMapper {
         //   10: takerBuyQuoteAssetVolume,
         //   11: ignore
         // ]
+
+        const volume = parseFloat(data[5]);
+        const takerBuyVolume = parseFloat(data[9]);
+
         return new Candle(
             data[0],                // timestamp (openTime)
             parseFloat(data[1]),    // open
             parseFloat(data[2]),    // high
             parseFloat(data[3]),    // low
             parseFloat(data[4]),    // close
-            parseFloat(data[5]),    // volume
+            volume,                 // volume
             symbol,
-            timeframe
+            timeframe,
+            takerBuyVolume          // Pass Taker Buy Volume for Delta calc
         );
     }
+    
 
     static toDomainArray(dataArray: BinanceKlineData[], symbol: string, timeframe: string): Candle[] {
         return dataArray.map(data => this.toDomain(data, symbol, timeframe));

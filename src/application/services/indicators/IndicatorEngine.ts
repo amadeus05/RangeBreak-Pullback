@@ -5,20 +5,13 @@ import { Candle } from '../../../domain/entities/Candle';
 @injectable()
 export class IndicatorEngine implements IIndicatorEngine {
     
-     calculateEMA(candles: Candle[], period: number): number {
+    calculateEMA(candles: Candle[], period: number): number {
         if (candles.length === 0) return 0;
-        
-        // Коэффициент сглаживания
         const k = 2 / (period + 1);
-        
-        // Начинаем с первой цены (как начальное значение)
         let ema = candles[0].close;
-        
-        // Проходим по всем свечам, обновляя EMA
         for (let i = 1; i < candles.length; i++) {
             ema = (candles[i].close * k) + (ema * (1 - k));
         }
-        
         return ema;
     }
 
@@ -26,20 +19,13 @@ export class IndicatorEngine implements IIndicatorEngine {
         if (candles.length < period + 1) return 0;
 
         const trueRanges: number[] = [];
-        
         for (let i = 1; i < candles.length; i++) {
             const high = candles[i].high;
             const low = candles[i].low;
             const prevClose = candles[i - 1].close;
-            
-            const tr = Math.max(
-                high - low,
-                Math.abs(high - prevClose),
-                Math.abs(low - prevClose)
-            );
+            const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
             trueRanges.push(tr);
         }
-
         return this.calculateSMA(trueRanges.slice(-period), period);
     }
 
@@ -85,16 +71,13 @@ export class IndicatorEngine implements IIndicatorEngine {
 
     calculateVWAP(candles: Candle[]): number {
         if (candles.length === 0) return 0;
-
         let cumulativeTPV = 0;
         let cumulativeVolume = 0;
-
         for (const candle of candles) {
             const typicalPrice = (candle.high + candle.low + candle.close) / 3;
             cumulativeTPV += typicalPrice * candle.volume;
             cumulativeVolume += candle.volume;
         }
-
         return cumulativeVolume !== 0 ? cumulativeTPV / cumulativeVolume : 0;
     }
 
@@ -102,5 +85,57 @@ export class IndicatorEngine implements IIndicatorEngine {
         if (values.length < period) return 0;
         const slice = values.slice(-period);
         return slice.reduce((sum, val) => sum + val, 0) / period;
+    }
+
+    // --- NEW METHODS FOR MEAN REVERSION ---
+
+    /**
+     * Calculates Standard Deviation
+     */
+    calculateStdDev(values: number[], period: number): number {
+        if (values.length < period) return 0;
+        const sma = this.calculateSMA(values, period);
+        const slice = values.slice(-period);
+        const squaredDiffs = slice.map(val => Math.pow(val - sma, 2));
+        const variance = squaredDiffs.reduce((sum, val) => sum + val, 0) / period;
+        return Math.sqrt(variance);
+    }
+
+    /**
+     * Calculates Z-Score: (Price - SMA) / StdDev
+     */
+    calculateZScore(candles: Candle[], period: number): number {
+        if (candles.length < period) return 0;
+        const prices = candles.map(c => c.close);
+        const sma = this.calculateSMA(prices, period);
+        const std = this.calculateStdDev(prices, period);
+        
+        return std === 0 ? 0 : (candles[candles.length - 1].close - sma) / std;
+    }
+
+    /**
+     * Calculates Slope of EMA over last N candles
+     * Returns change in price per bar
+     */
+    calculateSlope(candles: Candle[], period: number, lookback: number = 3): number {
+        if (candles.length < period + lookback) return 0;
+        
+        // Calculate EMA array
+        const emas: number[] = [];
+        const k = 2 / (period + 1);
+        let ema = candles[0].close; // seed
+        
+        for (let i = 1; i < candles.length; i++) {
+            ema = (candles[i].close * k) + (ema * (1 - k));
+            if (i >= candles.length - lookback - 1) {
+                emas.push(ema);
+            }
+        }
+
+        if (emas.length < 2) return 0;
+        const currentEMA = emas[emas.length - 1];
+        const prevEMA = emas[0]; // EMA 'lookback' bars ago
+        
+        return (currentEMA - prevEMA) / lookback;
     }
 }

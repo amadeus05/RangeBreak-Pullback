@@ -1,4 +1,10 @@
 export class Candle {
+    
+    // Calculated properties for analysis
+    public readonly buyVolume: number;
+    public readonly sellVolume: number;
+    public readonly delta: number;
+
     constructor(
         public readonly timestamp: number,
         public readonly open: number,
@@ -7,8 +13,21 @@ export class Candle {
         public readonly close: number,
         public readonly volume: number,
         public readonly symbol: string,
-        public readonly timeframe: string
-    ) {}
+        public readonly timeframe: string,
+        takerBuyVolume?: number
+    ) {
+        // If takerBuyVolume is provided (Binance/Bybit), we calculate Delta
+        // If not, we assume neutral (0) for safety
+        if (takerBuyVolume !== undefined) {
+            this.buyVolume = takerBuyVolume;
+            this.sellVolume = volume - takerBuyVolume;
+        } else {
+            this.buyVolume = volume / 2;
+            this.sellVolume = volume / 2;
+        }
+        
+        this.delta = this.buyVolume - this.sellVolume;
+    }
 
     get body(): number {
         return Math.abs(this.close - this.open);
