@@ -62,61 +62,62 @@ export class RunBacktest {
     }
 
     private async fetchHistoricalData(symbol: string, timeframe: string, start: number, end: number): Promise<Candle[]> {
-        const timeframeMs = this.getTimeframeMs(timeframe);
-        const expectedCount = Math.floor((end - start) / timeframeMs);
-        
-        // 1. Считаем, сколько есть
+        // 1. Спрашиваем базу, сколько там свечей в этом диапазоне
         const dbCount = await this.candleRepo.countInRange(symbol, timeframe, start, end);
 
-        // Если данных достаточно (> 95%), просто возвращаем их
-        if (dbCount >= expectedCount * 0.95) {
-            this.logger.info(`Data for ${timeframe} found in DB (${dbCount} candles). Loading...`);
+        // --- HOTFIX: OFFLINE MODE ---
+        // Если мы нашли хотя бы 100 свечей, считаем, что данные есть, и не качаем заново.
+        // Это спасет от бесконечных загрузок, если окно сдвинулось на 5 минут.
+        if (dbCount > 100) {
+            this.logger.info(`⚡ FAST START: Found ${dbCount} candles in DB for ${timeframe}. Using existing data.`);
+            
+            // Загружаем то, что есть, даже если там не хватает последних 5 минут
             return await this.candleRepo.getCandles(symbol, timeframe, start, end);
         }
+        // -----------------------------
 
-        // 2. Если данных мало, определяем точку старта (RESUME)
+        this.logger.info(`Data missing (found only ${dbCount}). Starting download for ${timeframe}...`);
+
+        // 2. Если данных совсем нет (или меньше 100), тогда качаем (RESUME логика)
         let curr = start;
-        
-        // Спрашиваем базу: "Какая у тебя последняя свеча?"
         const lastInDb = await this.candleRepo.getLastCandle(symbol, timeframe);
         
         if (lastInDb && lastInDb.timestamp >= start && lastInDb.timestamp < end) {
-            this.logger.info(`Resuming ${timeframe} download from ${new Date(lastInDb.timestamp).toISOString()} (Found ${dbCount} candles)`);
-            curr = lastInDb.timestamp + 1; // Продолжаем со следующей мс
-        } else {
-            this.logger.info(`Starting new download for ${timeframe}...`);
+            this.logger.info(`Resuming ${timeframe} download from ${new Date(lastInDb.timestamp).toISOString()}`);
+            curr = lastInDb.timestamp + 1; 
         }
 
-        // 3. Цикл скачивания (Forward Fill)
+        // 3. Цикл скачивания
         const allNewCandles: Candle[] = [];
         const LIMIT = 1000;
 
         while (curr < end) {
-            const batch = await this.dataFeed.getCandles(symbol, timeframe, LIMIT, curr);
-            
-            if (!batch.length) break;
+            try {
+                const batch = await this.dataFeed.getCandles(symbol, timeframe, LIMIT, curr);
+                
+                if (!batch.length) break;
 
-            await this.candleRepo.saveCandles(batch);
-            
-            allNewCandles.push(...batch);
-            const lastTimestamp = batch[batch.length - 1].timestamp;
-            
-            // Лог прогресса
-            const progress = ((lastTimestamp - start) / (end - start)) * 100;
-            if (Math.random() > 0.9) {
+                await this.candleRepo.saveCandles(batch);
+                allNewCandles.push(...batch);
+                
+                const lastTimestamp = batch[batch.length - 1].timestamp;
+                const progress = ((lastTimestamp - start) / (end - start)) * 100;
+                
                 process.stdout.write(`\rDownloading ${timeframe}: ${progress.toFixed(1)}%...`);
-            }
 
-            if (lastTimestamp >= end) break;
-            
-            curr = lastTimestamp + 1;
-            await this.sleep(50); // Лимиты API
+                if (lastTimestamp >= end) break;
+                curr = lastTimestamp + 1;
+                
+                await this.sleep(50); // Не бомбим API
+            } catch (e) {
+                console.error(`\nDownload interrupted: ${e}`);
+                break; // Выходим при ошибке, чтобы сохранить то, что скачали
+            }
         }
         
-        console.log(''); // New line
-        this.logger.info(`Download finished. Added ${allNewCandles.length} new candles.`);
+        console.log('');
+        this.logger.info(`Download finished. Added ${allNewCandles.length} candles.`);
         
-        // Возвращаем полный набор из базы
         return await this.candleRepo.getCandles(symbol, timeframe, start, end);
     }
 
@@ -181,7 +182,7 @@ export class RunBacktest {
             totalPnl: stats.totalPnl,
             finalBalance: initialBalance + stats.totalPnl,
             maxDrawdown: 0,
-            profitFactor: stats.losses > 0 ? stats.wins / stats.losses : 0
+            profitFactor: stats.profitFactor // Берем из репо
         };
     }
 
