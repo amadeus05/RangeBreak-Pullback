@@ -6,16 +6,17 @@ import { Candle } from '../../../domain/entities/Candle';
 export class IndicatorEngine implements IIndicatorEngine {
     
      calculateEMA(candles: Candle[], period: number): number {
-        if (candles.length === 0) return 0;
+        if (candles.length < period) return 0;
         
         // Коэффициент сглаживания
         const k = 2 / (period + 1);
         
-        // Начинаем с первой цены (как начальное значение)
-        let ema = candles[0].close;
+        // Начинаем с SMA для первых N свечей (правильная инициализация)
+        const initialSMA = candles.slice(0, period).reduce((sum, c) => sum + c.close, 0) / period;
+        let ema = initialSMA;
         
-        // Проходим по всем свечам, обновляя EMA
-        for (let i = 1; i < candles.length; i++) {
+        // Проходим по оставшимся свечам, обновляя EMA
+        for (let i = period; i < candles.length; i++) {
             ema = (candles[i].close * k) + (ema * (1 - k));
         }
         
@@ -40,49 +41,81 @@ export class IndicatorEngine implements IIndicatorEngine {
             trueRanges.push(tr);
         }
 
-        return this.calculateSMA(trueRanges.slice(-period), period);
+        // Используем EMA сглаживание (Wilder's smoothing) вместо SMA
+        // Для первого ATR используем SMA
+        if (trueRanges.length < period) return 0;
+        
+        const initialATR = this.calculateSMA(trueRanges.slice(0, period), period);
+        let atr = initialATR;
+        
+        // Сглаживаем оставшиеся значения (EMA с коэффициентом 1/period)
+        for (let i = period; i < trueRanges.length; i++) {
+            atr = (trueRanges[i] + (period - 1) * atr) / period;
+        }
+
+        return atr;
     }
 
     calculateADX(candles: Candle[], period: number = 14): number {
         if (candles.length < period * 2) return 0;
-
-        const smoothing = period;
-        let plusDM: number[] = [];
-        let minusDM: number[] = [];
-        let tr: number[] = [];
-
+    
+        const tr: number[] = [];
+        const plusDM: number[] = [];
+        const minusDM: number[] = [];
+    
+        // 1️⃣ TR, +DM, -DM
         for (let i = 1; i < candles.length; i++) {
-            const highDiff = candles[i].high - candles[i - 1].high;
-            const lowDiff = candles[i - 1].low - candles[i].low;
-
-            const plusDMValue = highDiff > lowDiff && highDiff > 0 ? highDiff : 0;
-            const minusDMValue = lowDiff > highDiff && lowDiff > 0 ? lowDiff : 0;
-
-            plusDM.push(plusDMValue);
-            minusDM.push(minusDMValue);
-
-            const trValue = Math.max(
-                candles[i].high - candles[i].low,
-                Math.abs(candles[i].high - candles[i - 1].close),
-                Math.abs(candles[i].low - candles[i - 1].close)
-            );
-            tr.push(trValue);
+            const curr = candles[i];
+            const prev = candles[i - 1];
+    
+            const upMove = curr.high - prev.high;
+            const downMove = prev.low - curr.low;
+    
+            plusDM.push(upMove > downMove && upMove > 0 ? upMove : 0);
+            minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
+    
+            tr.push(Math.max(
+                curr.high - curr.low,
+                Math.abs(curr.high - prev.close),
+                Math.abs(curr.low - prev.close)
+            ));
         }
-
-        const smoothedPlusDM = this.calculateSMA(plusDM.slice(-smoothing), smoothing);
-        const smoothedMinusDM = this.calculateSMA(minusDM.slice(-smoothing), smoothing);
-        const smoothedTR = this.calculateSMA(tr.slice(-smoothing), smoothing);
-
-        const plusDI = smoothedTR !== 0 ? (smoothedPlusDM / smoothedTR) * 100 : 0;
-        const minusDI = smoothedTR !== 0 ? (smoothedMinusDM / smoothedTR) * 100 : 0;
-
-        const dx = plusDI + minusDI !== 0 
-            ? (Math.abs(plusDI - minusDI) / (plusDI + minusDI)) * 100 
-            : 0;
-
-        return dx;
+    
+        // 2️⃣ Initial Wilder smoothing (SMA)
+        let atr = tr.slice(0, period).reduce((a, b) => a + b, 0) / period;
+        let smoothPlusDM = plusDM.slice(0, period).reduce((a, b) => a + b, 0) / period;
+        let smoothMinusDM = minusDM.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    
+        const dxValues: number[] = [];
+    
+        // 3️⃣ Wilder smoothing + DX
+        for (let i = period; i < tr.length; i++) {
+            atr = (atr * (period - 1) + tr[i]) / period;
+            smoothPlusDM = (smoothPlusDM * (period - 1) + plusDM[i]) / period;
+            smoothMinusDM = (smoothMinusDM * (period - 1) + minusDM[i]) / period;
+    
+            const plusDI = (smoothPlusDM / atr) * 100;
+            const minusDI = (smoothMinusDM / atr) * 100;
+    
+            const dx = (plusDI + minusDI === 0)
+                ? 0
+                : (Math.abs(plusDI - minusDI) / (plusDI + minusDI)) * 100;
+    
+            dxValues.push(dx);
+        }
+    
+        // 4️⃣ Initial ADX = SMA(DX)
+        let adx = dxValues.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    
+        // 5️⃣ Final Wilder ADX
+        for (let i = period; i < dxValues.length; i++) {
+            adx = (adx * (period - 1) + dxValues[i]) / period;
+        }
+    
+        return adx;
     }
-
+    
+    //TODO ⚠️ нужен anchor
     calculateVWAP(candles: Candle[]): number {
         if (candles.length === 0) return 0;
 
