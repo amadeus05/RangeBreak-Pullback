@@ -1,5 +1,6 @@
 import { injectable, inject } from 'inversify';
 import { RangeBreakPullbackStrategy } from '../strategies/RangeBreakPullbackStrategy';
+import { ExecutionEngine } from '../services/execution/ExecutionEngine';
 import { IExchange } from '../../domain/interfaces/IExchange';
 import { Candle } from '../../domain/entities/Candle';
 import { Logger } from '../../shared/logger/Logger';
@@ -19,7 +20,9 @@ export class RunLiveTrading {
 
     constructor(
         @inject(TYPES.Strategy) private readonly strategy: RangeBreakPullbackStrategy,
-        @inject(TYPES.IExchange) private readonly exchange: IExchange
+        @inject(TYPES.IExchange) private readonly exchange: IExchange,
+        // Inject ExecutionEngine to actually handle the orders and positions
+        @inject(ExecutionEngine) private readonly executionEngine: ExecutionEngine
     ) {}
 
     async start(config: LiveTradingConfig): Promise<void> {
@@ -34,6 +37,8 @@ export class RunLiveTrading {
                 await this.sleep(config.tickInterval);
             } catch (error) {
                 this.logger.error('Error in tick loop', error);
+                // Optional: add a small delay on error to prevent infinite fast-crashing
+                await this.sleep(1000);
             }
         }
     }
@@ -51,6 +56,7 @@ export class RunLiveTrading {
     }
 
     private async processTick(symbol: string): Promise<void> {
+        // 1. Fetch latest data
         const latest5m = await this.exchange.getCandles(symbol, '5m', 1);
         const latest1m = await this.exchange.getCandles(symbol, '1m', 1);
 
@@ -62,11 +68,25 @@ export class RunLiveTrading {
             this.updateCandleBuffer(this.candles1m, latest1m[0], 300);
         }
 
-        // В будущем: получать реальный баланс через this.exchange.getBalance()
-        const currentBalance = 500; 
+        const current1m = this.candles1m[this.candles1m.length - 1];
+        if (!current1m) return;
 
-        // Передаем баланс в стратегию
-        await this.strategy.processTick(symbol, this.candles5m, this.candles1m, currentBalance);
+        // 2. Update Execution Engine (Checks SL/TP and pending orders)
+        await this.executionEngine.onMarketData(current1m);
+
+        // 3. Generate Signal from Strategy
+        // The method is generateSignal, not processTick
+        const signal = this.strategy.generateSignal(
+            symbol, 
+            this.candles5m, 
+            this.candles1m
+        );
+
+        // 4. If strategy produced a signal, place the order
+        if (signal) {
+            this.logger.info(`[STRATEGY] New signal generated for ${symbol}: ${signal.direction}`);
+            await this.executionEngine.placeOrder(signal);
+        }
     }
 
     private updateCandleBuffer(buffer: Candle[], newCandle: Candle, maxSize: number): void {

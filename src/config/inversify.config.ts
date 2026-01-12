@@ -24,7 +24,11 @@ import { RiskEngine } from '../application/services/risk/RiskEngine';
 import { StateMachine } from '../application/services/state/StateMachine';
 import { RangeBreakPullbackStrategy } from '../application/strategies/RangeBreakPullbackStrategy';
 
-// Repositories & UseCases (Обязательно импортируем!)
+// NEW: Portfolio & Execution
+import { PortfolioManager } from '../application/services/portfolio/PortfolioManager';
+import { ExecutionEngine } from '../application/services/execution/ExecutionEngine';
+
+// Repositories & UseCases
 import { CandleRepository } from '../infrastructure/database/repositories/CandleRepository';
 import { TradeRepository } from '../infrastructure/database/repositories/TradeRepository';
 import { RunBacktest } from '../application/use-cases/RunBacktest';
@@ -32,7 +36,7 @@ import { RunLiveTrading } from '../application/use-cases/RunLiveTrading';
 
 export { TYPES };
 
-export function createContainer(mode: 'backtest' | 'live'): Container {
+export function createContainer(mode: 'backtest' | 'live', initialBalance: number = 500): Container {
     const container = new Container();
 
     // --- Core Services ---
@@ -45,23 +49,28 @@ export function createContainer(mode: 'backtest' | 'live'): Container {
     container.bind<IStateMachine>(TYPES.IStateMachine).to(StateMachine).inSingletonScope();
     container.bind<RangeBreakPullbackStrategy>(TYPES.Strategy).to(RangeBreakPullbackStrategy);
 
+    // --- NEW: Portfolio Manager (с начальным балансом) ---
+    container.bind<PortfolioManager>(PortfolioManager).toConstantValue(
+        new PortfolioManager(initialBalance)
+    );
+
+    // --- NEW: Execution Engine ---
+    container.bind<ExecutionEngine>(ExecutionEngine).toSelf().inSingletonScope();
+
     // --- Repositories ---
-    // Регистрируем репозитории, чтобы UseCase мог их получить
     container.bind<CandleRepository>(CandleRepository).toSelf().inSingletonScope();
     container.bind<TradeRepository>(TradeRepository).toSelf().inSingletonScope();
 
     // --- Exchanges Setup ---
-    // 1. DataFeed: Всегда Bybit (для данных)
+    // DataFeed: Всегда Bybit
     container.bind<IExchange>(TYPES.IDataFeed).to(BybitExchangeAdapter).inSingletonScope();
 
-    // 2. Execution Exchange: Зависит от режима
+    // Execution Exchange: Зависит от режима
     if (mode === 'backtest') {
         container.bind<IExchange>(TYPES.IExchange).to(PaperTradingExchange).inSingletonScope();
-        container.bind<RunBacktest>(RunBacktest).toSelf(); 
+        container.bind<RunBacktest>(RunBacktest).toSelf();
     } else {
         container.bind<IExchange>(TYPES.IExchange).to(BybitExchangeAdapter).inSingletonScope();
-        
-        // Для Live режима регистрируем RunLiveTrading
         container.bind<RunLiveTrading>(RunLiveTrading).toSelf();
     }
 

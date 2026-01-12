@@ -9,7 +9,7 @@ datasource db {
 
 model Candle {
   id         Int      @id @default(autoincrement())
-  timestamp  BigInt   @unique
+  timestamp  BigInt
   symbol     String
   timeframe  String
   open       Float
@@ -19,6 +19,7 @@ model Candle {
   volume     Float
   createdAt  DateTime @default(now())
 
+  @@unique([symbol, timeframe, timestamp])
   @@index([symbol, timeframe, timestamp])
   @@map("candles")
 }

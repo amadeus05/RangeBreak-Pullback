@@ -37,28 +37,41 @@ export class CandleRepository {
     async saveCandles(candles: Candle[]): Promise<void> {
         if (candles.length === 0) return;
 
-        const timestamps = candles.map(c => c.timestamp);
-        const minTime = Math.min(...timestamps);
-        const maxTime = Math.max(...timestamps);
+        // Prisma типы для SQLite могут не поддерживать skipDuplicates (оно типизируется как never).
+        // Поэтому делаем дедуп вручную: читаем существующие timestamp в диапазоне и вставляем только отсутствующие.
+        // Также группируем, чтобы корректно обрабатывать массив, где потенциально смешаны разные symbol/timeframe.
+        const groups = new Map<string, Candle[]>();
+        for (const c of candles) {
+            const key = `${c.symbol}__${c.timeframe}`;
+            const arr = groups.get(key);
+            if (arr) arr.push(c);
+            else groups.set(key, [c]);
+        }
 
-        const existing = await this.prisma.candle.findMany({
-            where: {
-                symbol: candles[0].symbol,
-                timeframe: candles[0].timeframe,
-                timestamp: { gte: BigInt(minTime), lte: BigInt(maxTime) }
-            },
-            select: { timestamp: true }
-        });
+        for (const [, group] of groups) {
+            if (group.length === 0) continue;
 
-        const existingSet = new Set(existing.map(e => Number(e.timestamp)));
-        const candlesToInsert = candles.filter(c => !existingSet.has(c.timestamp));
+            const timestamps = group.map(c => c.timestamp);
+            const minTime = Math.min(...timestamps);
+            const maxTime = Math.max(...timestamps);
+            const symbol = group[0].symbol;
+            const timeframe = group[0].timeframe;
 
-        if (candlesToInsert.length === 0) return;
+            const existing = await this.prisma.candle.findMany({
+                where: {
+                    symbol,
+                    timeframe,
+                    timestamp: { gte: BigInt(minTime), lte: BigInt(maxTime) }
+                },
+                select: { timestamp: true }
+            });
 
-        // Используем transaction для скорости
-        const operations = candlesToInsert.map(c => 
-            this.prisma.candle.create({
-                data: {
+            const existingSet = new Set(existing.map(e => Number(e.timestamp)));
+            const candlesToInsert = group.filter(c => !existingSet.has(c.timestamp));
+            if (candlesToInsert.length === 0) continue;
+
+            await this.prisma.candle.createMany({
+                data: candlesToInsert.map(c => ({
                     timestamp: BigInt(c.timestamp),
                     symbol: c.symbol,
                     timeframe: c.timeframe,
@@ -67,15 +80,8 @@ export class CandleRepository {
                     low: c.low,
                     close: c.close,
                     volume: c.volume
-                }
-            })
-        );
-
-        try {
-            await this.prisma.$transaction(operations);
-        } catch (error) {
-            // Fallback
-            for (const op of operations) try { await op; } catch (e) {}
+                }))
+            });
         }
     }
 

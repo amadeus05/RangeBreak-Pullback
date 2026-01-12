@@ -12,14 +12,9 @@ export class BinanceExchangeAdapter implements IExchange {
     async getCandles(symbol: string, timeframe: string, limit: number = 1000, startTime?: number): Promise<Candle[]> {
         const endpoint = '/fapi/v1/klines';
         
-        // Маппинг таймфреймов (Binance использует другой формат)
         const tfMap: Record<string, string> = { 
-            '1m': '1m', 
-            '5m': '5m', 
-            '15m': '15m', 
-            '1h': '1h', 
-            '4h': '4h', 
-            '1d': '1d' 
+            '1m': '1m', '5m': '5m', '15m': '15m', 
+            '1h': '1h', '4h': '4h', '1d': '1d' 
         };
         const binanceInterval = tfMap[timeframe] || timeframe;
 
@@ -33,19 +28,39 @@ export class BinanceExchangeAdapter implements IExchange {
             params.append('startTime', startTime.toString());
         }
 
-        const response = await fetch(`${this.baseUrl}${endpoint}?${params}`);
-        const json = await response.json() as BinanceKlineResponse;
+        try {
+            const response = await fetch(`${this.baseUrl}${endpoint}?${params}`);
+            
+            if (!response.ok) {
+                console.error(`[BINANCE API ERROR] ${response.status} ${response.statusText} for ${symbol}`);
+                return [];
+            }
 
-        // Binance уже возвращает [Oldest, ..., Newest], поэтому reverse не нужен
-        return BinanceCandleMapper.toDomainArray(json, symbol, timeframe);
+            const json = await response.json();
+
+            // ВАЖНО: Проверяем, что это массив. Binance может вернуть объект ошибки.
+            if (!Array.isArray(json)) {
+                console.error(`[BINANCE API ERROR] Expected array, got object for ${symbol}:`, JSON.stringify(json).slice(0, 100));
+                return [];
+            }
+
+            return BinanceCandleMapper.toDomainArray(json as BinanceKlineResponse, symbol, timeframe);
+        } catch (error) {
+            console.error(`[NETWORK ERROR] Failed to fetch candles for ${symbol}:`, error);
+            return [];
+        }
     }
 
     async getCurrentPrice(symbol: string): Promise<number> {
-        const endpoint = '/fapi/v1/ticker/price';
-        const params = new URLSearchParams({ symbol });
-        const response = await fetch(`${this.baseUrl}${endpoint}?${params}`);
-        const json = await response.json() as BinanceTickerResponse;
-        return parseFloat(json.price);
+        try {
+            const endpoint = '/fapi/v1/ticker/price';
+            const params = new URLSearchParams({ symbol });
+            const response = await fetch(`${this.baseUrl}${endpoint}?${params}`);
+            const json = await response.json() as BinanceTickerResponse;
+            return parseFloat(json.price);
+        } catch (e) {
+            return 0;
+        }
     }
 
     async placeOrder(): Promise<string> { throw new Error('Not implemented'); }

@@ -9,22 +9,26 @@ async function main() {
     const mode = args[0]; // 'backtest' или 'live'
 
     try {
+        // Парсим список символов через запятую (напр. BTCUSDT,ETHUSDT,SOLUSDT)
+        const symbolsArg = 'BTCUSDT,ETHUSDT,SOLUSDT';
+        const symbols = symbolsArg.includes(',') 
+            ? symbolsArg.split(',').map(s => s.trim()) 
+            : [symbolsArg || (mode === 'live' ? 'DOGEUSDT' : 'SOLUSDT')];
+
         if (mode === 'live') {
-            const symbol = args[1] || 'BTCUSDT';
-            logger.info(`Starting LIVE TRADING for ${symbol}...`);
-            await runLiveCommand({ symbol });
+            logger.info(`Starting LIVE TRADING for symbols: ${symbols.join(', ')}...`);
+            // await runLiveCommand({ symbols });
         } 
         else {
             // По умолчанию запускаем Backtest
-            const symbol = args[1] || 'BTCUSDT';
-            const days = parseInt(args[2]) || 180; // 360 дней по умолчанию
+            const days = parseInt(args[2]) || 7; // 7 дней по умолчанию
 
-            logger.info(`Starting BACKTEST for ${symbol} (last ${days} days)...`);
+            logger.info(`Starting BACKTEST for symbols: ${symbols.join(', ')} (last ${days} days)...`);
             if (!mode) {
-                logger.info('Tip: You can specify args: npm run dev backtest ETHUSDT 180');
+                logger.info('Tip: You can specify args: npm run dev backtest ETHUSDT,BTCUSDT 180');
             }
             
-            await runBacktestCommand({ symbol, days });
+            await runBacktestCommand({ symbols, days });
         }
     } catch (error) {
         logger.error('Application crashed', error);
