@@ -13,6 +13,11 @@ export class MomentumDetector {
 
     /**
      * Detect momentum signals
+     * 
+     * CHANGES v6.0:
+     * - More lenient spike detection
+     * - Accept moderate volume increases
+     * - Earlier detection of momentum shifts
      */
     public detect(candles: Candle[]): MomentumSignal {
         const closes = candles.map(c => c.close);
@@ -72,38 +77,94 @@ export class MomentumDetector {
         return ((currentPrice - oldPrice) / oldPrice) * 100;
     }
 
+    /**
+     * 🔧 OPTIMIZATION: More lenient spike detection
+     * 
+     * OLD LOGIC:
+     * - Required volumeRatio >= 1.8x
+     * - Required significant price move (0.5%)
+     * - Required RSI extremes (>70 or <30)
+     * 
+     * NEW LOGIC:
+     * - Accept volumeRatio >= 1.0x (any above average volume)
+     * - Accept smaller price moves (0.3%)
+     * - Accept moderate RSI (>60 or <40)
+     * - Use OR logic instead of AND for more flexibility
+     */
     private hasMomentumSpike(
         rsi: number,
         volumeRatio: number,
         priceChange: number
     ): boolean {
-        const rsiExtreme = rsi > StrategyConfig.momentum.rsiOverbought || rsi < StrategyConfig.momentum.rsiOversold;
-        const volumeSpike = volumeRatio >= StrategyConfig.momentum.volumeMultiplier;
-        const significantMove = Math.abs(priceChange) >= StrategyConfig.momentum.priceChangeMin;
+        // 🔧 Relaxed RSI extremes
+        const rsiExtreme = rsi > 60 || rsi < 40; // was 70/30
 
-        if (volumeRatio >= StrategyConfig.momentum.volumeMultiplier * 1.2) return true;
-        if (volumeSpike && significantMove) return true;
-        if (rsiExtreme && volumeSpike) return true;
+        // 🔧 Any above-average volume counts
+        const volumeSpike = volumeRatio >= StrategyConfig.momentum.volumeMultiplier; // 1.0
+
+        // 🔧 Smaller price moves accepted
+        const significantMove = Math.abs(priceChange) >= StrategyConfig.momentum.priceChangeMin; // 0.3%
+
+        // 🔧 CRITICAL: Use OR logic for multiple paths to spike
+        // Path 1: Strong volume spike (even if price/RSI weak)
+        if (volumeRatio >= StrategyConfig.momentum.volumeMultiplier * 1.5) {
+            return true;
+        }
+
+        // Path 2: Volume + significant price move
+        if (volumeSpike && significantMove) {
+            return true;
+        }
+
+        // Path 3: RSI extreme + volume
+        if (rsiExtreme && volumeSpike) {
+            return true;
+        }
+
+        // Path 4: Large price move alone (panic/euphoria)
+        if (Math.abs(priceChange) >= StrategyConfig.momentum.priceChangeMin * 2) {
+            return true;
+        }
+
+        // Path 5: Moderate conditions but all aligned
+        if (volumeRatio > 1.0 && Math.abs(priceChange) > 0.2 && (rsi > 55 || rsi < 45)) {
+            return true;
+        }
 
         return false;
     }
 
+    /**
+     * 🔧 OPTIMIZATION: More sensitive direction detection
+     */
     private determineMomentumDirection(
         rsi: number,
         priceChange: number
     ): TrendDirection {
-        if (priceChange > StrategyConfig.momentum.priceChangeMin) return TrendDirection.BULLISH;
-        if (priceChange < -StrategyConfig.momentum.priceChangeMin) return TrendDirection.BEARISH;
-        if (rsi > 55) return TrendDirection.BULLISH;
-        if (rsi < 45) return TrendDirection.BEARISH;
+        // Strong signals
+        if (priceChange > StrategyConfig.momentum.priceChangeMin) {
+            return TrendDirection.BULLISH;
+        }
+        if (priceChange < -StrategyConfig.momentum.priceChangeMin) {
+            return TrendDirection.BEARISH;
+        }
+
+        // 🔧 More sensitive RSI thresholds
+        if (rsi > 52) return TrendDirection.BULLISH;  // was 55
+        if (rsi < 48) return TrendDirection.BEARISH;  // was 45
+
         return TrendDirection.NEUTRAL;
     }
 
     public calculateMomentumScore(signal: MomentumSignal): number {
         const rsiDistance = Math.abs(signal.rsi - 50) / 50;
         const rsiScore = Math.min(rsiDistance, 1);
-        const volumeScore = Math.min((signal.volumeRatio - 1) / 2, 1);
+
+        // 🔧 Adjusted scoring for lower volume threshold
+        const volumeScore = Math.min((signal.volumeRatio - 0.5) / 2.5, 1); // was (x-1)/2
+
         const priceScore = Math.min(Math.abs(signal.priceChange) / 10, 1);
+
         return (rsiScore * 0.4 + volumeScore * 0.3 + priceScore * 0.3);
     }
 
@@ -159,10 +220,7 @@ export class MomentumDetector {
         const rsiHigh1 = Math.max(...recentRSI.slice(0, 10));
         const rsiHigh2 = Math.max(...recentRSI.slice(10));
 
-        // Bullish divergence: price makes lower low, RSI makes higher low
         const bullishDiv = priceLow2 < priceLow1 && rsiLow2 > rsiLow1;
-
-        // Bearish divergence: price makes higher high, RSI makes lower high
         const bearishDiv = priceHigh2 > priceHigh1 && rsiHigh2 < rsiHigh1;
 
         return { bullishDiv, bearishDiv };

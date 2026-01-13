@@ -261,7 +261,7 @@ export class ExecutionEngine {
 
         const dateStr = new Date(timestamp).toISOString().replace('T', ' ').substring(0, 19);
         this.logger.info(
-            `[${dateStr}] [EXECUTION] Entry ${signal.direction} @ ${entryPrice.toFixed(2)} ` +
+            `[${dateStr}] ➡️[EXECUTION] Entry ${signal.direction} @ ${entryPrice.toFixed(2)} ` +
             `| SL: ${signal.stopLoss.toFixed(2)} | TP: ${signal.takeProfit.toFixed(2)} | Fee: ${entryFee.toFixed(4)}`
         );
     }
@@ -372,9 +372,12 @@ export class ExecutionEngine {
         this.activePositions.delete(symbol);
 
         const dateStr = new Date(timestamp).toISOString().replace('T', ' ').substring(0, 19);
+        const color = (reason.includes('Stop') || reason === 'LIQUIDATED') ? '\x1b[31m' : (reason.includes('Profit') ? '\x1b[32m' : '');
+        const reset = color ? '\x1b[0m' : '';
+
         this.logger.info(
-            `[${dateStr}] [EXECUTION] Exit ${signal.direction} @ ${exitPrice.toFixed(2)} ` +
-            `(${reason}) | Net PnL: ${netPnl.toFixed(2)} | Fees: ${totalFee.toFixed(4)}`
+            `${color}[${dateStr}] 🏁[EXECUTION] Exit ${signal.direction} @ ${exitPrice.toFixed(2)} ` +
+            `(${reason}) | Net PnL: ${netPnl.toFixed(2)} | Fees: ${totalFee.toFixed(4)}${reset}`
         );
     }
 

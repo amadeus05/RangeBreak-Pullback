@@ -1,6 +1,13 @@
 /**
- * Momentum Strategy (Stateful Momentum Pullback v5.0 - Conservative)
- * Transferred from source bot
+ * Momentum Strategy v6.0 - Aggressive Profit Optimization
+ * 
+ * KEY CHANGES:
+ * 1. Relaxed regime filters (accept more market conditions)
+ * 2. Extended pullback timeout (50 → 100 bars)
+ * 3. Wider Fibonacci range (20%-80% instead of 30%-70%)
+ * 4. Lower volume threshold (1.2 → 1.0x)
+ * 5. Dynamic R:R based on volatility
+ * 6. Early entry on pullback structure (don't wait for perfect bounce)
  */
 
 import { injectable, inject } from 'inversify';
@@ -44,74 +51,84 @@ export class MomentumStrategy {
     private logger = Logger.getInstance();
     private analyzeCallCount: Map<string, number> = new Map();
 
+    // 🔧 OPTIMIZATION 1: Relaxed thresholds
+    private readonly MIN_VOLUME_RATIO = 1.0;  // was 1.2
+    private readonly PULLBACK_TIMEOUT = 100;   // was 50
+    private readonly MIN_FIB = 0.20;           // was 0.30
+    private readonly MAX_FIB = 0.80;           // was 0.70
+    private readonly MIN_TREND_STRENGTH = 0.0; // was implicit filter
+
     constructor(
         @inject(TYPES.TrendAnalyzer) private readonly trendAnalyzer: TrendAnalyzer,
         @inject(TYPES.MomentumDetector) private readonly momentumDetector: MomentumDetector,
         @inject(TYPES.PullbackScanner) private readonly pullbackScanner: PullbackScanner,
         @inject(TYPES.RegimeDetector) private readonly regimeDetector: RegimeDetector
     ) {
-        this.logger.info('StrategyEngine', 'Initialized (Stateful Momentum Pullback v5.0 - Conservative)');
+        this.logger.info('StrategyEngine', 'Initialized (Momentum v6.0 - Aggressive)');
     }
 
     public analyze(symbol: string, candles: Candle[]): TradingSignal | null {
-        // Increment call counter for this symbol
         const callCount = (this.analyzeCallCount.get(symbol) || 0) + 1;
         this.analyzeCallCount.set(symbol, callCount);
 
         const last = candles[candles.length - 1];
-
         let setup = this.setups.get(symbol);
+
         if (!setup) {
             this.resetSetup(symbol);
             setup = this.setups.get(symbol)!;
-            this.info(symbol, '🆕 NEW SETUP CREATED (IDLE)');
         }
 
-        // === 1. STRICT REGIME FILTER ===
+        // 🔧 OPTIMIZATION 2: More lenient regime filter
         const regime = this.regimeDetector.detect(candles);
-        const isTrending = this.regimeDetector.isTrendingRegime(regime);
+        const shouldLog = callCount % 10000 === 0;
 
-        // DEBUG: Log every 5000 calls
-        const shouldLog = callCount % 5000 === 0;
-        if (shouldLog) {
-            this.info(symbol, `📊 DEBUG [${callCount}]: regime=${regime}, isTrending=${isTrending}`);
+        // Accept TRENDING and VOLATILE (was TRENDING only)
+        const isValidRegime = regime === MarketRegime.TRENDING ||
+            regime === MarketRegime.VOLATILE;
+
+        if (!isValidRegime) {
+            if (shouldLog) {
+                this.debug(symbol, `⏸️ Invalid regime: ${regime}`);
+            }
+            if (setup.state !== SetupState.IDLE) {
+                return this.invalidate(symbol, `REGIME_INVALID:${regime}`);
+            }
+            return null;
         }
 
-        if (!isTrending) {
-            if (setup.state === SetupState.IDLE) return null;
-            return this.invalidate(symbol, `REGIME_NOT_TRENDING:${regime}`);
-        }
-
-        const trend = this.trendAnalyzer.analyze(candles);
+        const trend = this.trendAnalyzer.analyze(candles, regime);
 
         switch (setup.state) {
             case SetupState.IDLE: {
-                if (shouldLog) {
-                    this.info(symbol, `📊 DEBUG IDLE [${callCount}]: trend.isStrong=${trend.isStrong}, strength=${trend.strength.toFixed(2)}, dir=${trend.direction}`);
-                }
+                // 🔧 OPTIMIZATION 3: Don't require strong trend
+                // Accept weak trends in VOLATILE regime
+                const trendOk = regime === MarketRegime.VOLATILE
+                    ? trend.direction !== TrendDirection.NEUTRAL
+                    : trend.isStrong && trend.direction !== TrendDirection.NEUTRAL;
 
-                if (!trend.isStrong || trend.direction === TrendDirection.NEUTRAL) {
-                    if (shouldLog) this.debug(symbol, `⏸️ Trend not strong enough`);
+                if (!trendOk) {
+                    if (shouldLog) {
+                        this.debug(symbol, `⏸️ Trend weak: ${trend.strength.toFixed(2)}, dir=${trend.direction}`);
+                    }
                     return null;
                 }
 
                 const momentum = this.momentumDetector.detect(candles);
-                if (shouldLog) {
-                    this.info(symbol, `📊 DEBUG: momentum.hasSpike=${momentum.hasSpike}, volumeRatio=${momentum.volumeRatio.toFixed(2)}, dir=${momentum.direction}`);
-                }
 
                 if (!momentum.hasSpike) {
-                    if (shouldLog) this.debug(symbol, `⏸️ No momentum spike`);
-                    return null;
-                }
-                if (momentum.direction !== trend.direction) {
-                    if (shouldLog) this.debug(symbol, `⏸️ Momentum direction mismatch`);
                     return null;
                 }
 
-                // Volume filter: only enter if impulse volume was noticeable (>1.2x)
-                if (momentum.volumeRatio < 1.2) {
-                    if (shouldLog) this.debug(symbol, `⏸️ Volume ratio too low: ${momentum.volumeRatio.toFixed(2)}`);
+                if (momentum.direction !== trend.direction) {
+                    return null;
+                }
+
+                // 🔧 OPTIMIZATION 4: Lower volume filter
+                if (momentum.volumeRatio < this.MIN_VOLUME_RATIO) {
+                    if (shouldLog) {
+                        this.debug(symbol, `⏸️ Volume too low: ${momentum.volumeRatio.toFixed(2)}`);
+                    }
                     return null;
                 }
 
@@ -123,9 +140,10 @@ export class MomentumStrategy {
                 setup.impulseVolumeRatio = momentum.volumeRatio;
                 setup.barsSinceImpulse = 0;
 
-                this.info(symbol, '🔥 IMPULSE DETECTED → WAITING_PULLBACK', {
+                this.info(symbol, '🔥 IMPULSE → WAITING_PULLBACK', {
                     dir: setup.direction,
-                    vol: setup.impulseVolumeRatio.toFixed(2)
+                    vol: setup.impulseVolumeRatio.toFixed(2),
+                    regime
                 });
                 return null;
             }
@@ -133,45 +151,52 @@ export class MomentumStrategy {
             case SetupState.WAITING_PULLBACK: {
                 setup.barsSinceImpulse++;
 
-                // Timeout 50 bars
-                if (setup.barsSinceImpulse > 50) {
-                    this.info(symbol, `⏱️ TIMEOUT after 50 bars`);
+                // 🔧 OPTIMIZATION 5: Extended timeout
+                if (setup.barsSinceImpulse > this.PULLBACK_TIMEOUT) {
+                    this.info(symbol, `⏱️ TIMEOUT after ${this.PULLBACK_TIMEOUT} bars`);
                     return this.invalidate(symbol, 'TIMEOUT');
                 }
 
-                // Structural Break
+                // Structural Break Check
                 if (setup.direction === TrendDirection.BULLISH && last.low < setup.impulseLow)
-                    return this.invalidate(symbol, 'IMPULSE LOW BROKEN');
+                    return this.invalidate(symbol, 'IMPULSE_LOW_BROKEN');
                 if (setup.direction === TrendDirection.BEARISH && last.high > setup.impulseHigh)
-                    return this.invalidate(symbol, 'IMPULSE HIGH BROKEN');
+                    return this.invalidate(symbol, 'IMPULSE_HIGH_BROKEN');
 
                 const pullback = this.pullbackScanner.scan(candles, trend);
-                if (!pullback.occurred) return null;
-                if (!pullback.isValid) return null;
 
-                // Sanity checks
-                if (!Number.isFinite(pullback.level) || !Number.isFinite(pullback.low) || !Number.isFinite(pullback.high)) {
-                    return this.invalidate(symbol, 'BAD_PULLBACK_NUMBERS');
+                if (!pullback.occurred || !pullback.isValid) {
+                    return null;
+                }
+
+                // Validation
+                if (!this.isValidNumber(pullback.level) ||
+                    !this.isValidNumber(pullback.low) ||
+                    !this.isValidNumber(pullback.high)) {
+                    return this.invalidate(symbol, 'BAD_PULLBACK_VALUES');
                 }
 
                 const isLong = setup.direction === TrendDirection.BULLISH;
                 const impulseRange = setup.impulseHigh - setup.impulseLow;
 
-                if (!Number.isFinite(impulseRange) || impulseRange <= 0) {
+                if (!this.isValidNumber(impulseRange) || impulseRange <= 0) {
                     return this.invalidate(symbol, 'BAD_IMPULSE_RANGE');
                 }
 
-                let currentPullbackDist = isLong
+                const currentPullbackDist = isLong
                     ? setup.impulseHigh - pullback.level
                     : pullback.level - setup.impulseLow;
 
                 const fibLevel = currentPullbackDist / impulseRange;
-                if (!Number.isFinite(fibLevel)) {
+
+                if (!this.isValidNumber(fibLevel)) {
                     return this.invalidate(symbol, 'BAD_FIB_LEVEL');
                 }
 
-                // FILTER: 30% - 70% Fib
-                if (fibLevel < 0.3 || fibLevel > 0.7) return null;
+                // 🔧 OPTIMIZATION 6: Wider Fib range
+                if (fibLevel < this.MIN_FIB || fibLevel > this.MAX_FIB) {
+                    return null;
+                }
 
                 setup.pullbackLow = pullback.low;
                 setup.pullbackHigh = pullback.high;
@@ -179,19 +204,50 @@ export class MomentumStrategy {
                 setup.pullback = pullback;
                 setup.state = SetupState.PULLBACK_CONFIRMED;
 
-                this.info(symbol, `🟢 PULLBACK CONFIRMED (Fib: ${fibLevel.toFixed(2)}) → checking bounce`, setup);
+                const dateStr = new Date(last.timestamp).toISOString().replace('T', ' ').substring(0, 19);
+                const formattedRange = impulseRange.toFixed(2);
+
+                const logMsg =
+                    `\n🟢 PULLBACK ${symbol} | ${setup.direction} | Fib ${fibLevel.toFixed(2)}\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `📊 IMPULSE: ${setup.impulseLow.toFixed(2)} → ${setup.impulseHigh.toFixed(2)} (${formattedRange})\n` +
+                    `   ├── ATR: ${setup.impulseATR.toFixed(2)} | 📈 Volume: ×${setup.impulseVolumeRatio.toFixed(2)}\n` +
+                    `   └── 🕒 ${setup.barsSinceImpulse} bars ago\n` +
+                    `   \n` +
+                    `🔄 PULLBACK: ${setup.pullback?.level.toFixed(2)} (${(setup.pullbackDepth! * 100).toFixed(3)}% depth)\n` +
+                    `   ├── EMA Dist: ${setup.pullback?.distanceFromEMA.toFixed(3)} | ${setup.pullback?.isValid ? '✅ Valid' : '❌ Invalid'}\n` +
+                    `   └── State: ${setup.state}\n` +
+                    `   \n` +
+                    `⏰ ${dateStr}`;
+
+                this.info(symbol, logMsg);
+
+                // 🔧 OPTIMIZATION 7: Early entry - don't wait for perfect bounce
+                // If structure is good, enter immediately
+                const earlyEntry = this.shouldEnterEarly(candles, setup, fibLevel);
+                if (earlyEntry) {
+                    setup.state = SetupState.READY_TO_ENTER;
+                    this.info(symbol, '⚡ EARLY ENTRY (structure confirmed)');
+                }
+
                 return null;
             }
 
             case SetupState.PULLBACK_CONFIRMED: {
-                if (!setup.pullback) return this.invalidate(symbol, 'PULLBACK_MISSING');
+                if (!setup.pullback) {
+                    return this.invalidate(symbol, 'PULLBACK_MISSING');
+                }
 
                 const bouncing = this.pullbackScanner.isBouncing(candles, setup.pullback, setup.direction);
 
                 if (!bouncing) {
                     const isLong = setup.direction === TrendDirection.BULLISH;
-                    if (isLong && last.close < setup.pullbackLow!) return this.invalidate(symbol, 'LOWER LOW');
-                    if (!isLong && last.close > setup.pullbackHigh!) return this.invalidate(symbol, 'HIGHER HIGH');
+                    if (isLong && last.close < setup.pullbackLow!) {
+                        return this.invalidate(symbol, 'LOWER_LOW');
+                    }
+                    if (!isLong && last.close > setup.pullbackHigh!) {
+                        return this.invalidate(symbol, 'HIGHER_HIGH');
+                    }
                     return null;
                 }
 
@@ -202,40 +258,66 @@ export class MomentumStrategy {
             case SetupState.READY_TO_ENTER: {
                 const signal = this.generateSignal(symbol, candles, setup);
                 setup.state = SetupState.ENTERED;
-                this.info(symbol, '🎯🎯🎯 TRADE SIGNAL EMITTED!', signal);
+                this.info(symbol, '🎯 SIGNAL EMITTED', signal);
                 return signal;
             }
 
             case SetupState.ENTERED:
-                this.resetSetup(symbol);
-                return null;
-
             case SetupState.INVALIDATED:
                 this.resetSetup(symbol);
                 return null;
         }
     }
 
+
+    // 🔧 OPTIMIZATION 8: Early entry logic
+    private shouldEnterEarly(candles: Candle[], setup: MomentumSetup, fibLevel: number): boolean {
+        if (candles.length < 3) return false;
+
+        const last = candles[candles.length - 1];
+        const prev = candles[candles.length - 2];
+        const isLong = setup.direction === TrendDirection.BULLISH;
+
+        // Enter early if:
+        // 1. Fib is ideal (0.5-0.6)
+        // 2. Volume spike on pullback
+        // 3. Price structure shows reversal
+        const idealFib = fibLevel >= 0.50 && fibLevel <= 0.60;
+        const volumeSpike = last.volume > prev.volume * 1.2;
+
+        const priceReversal = isLong
+            ? last.close > last.open && last.close > prev.close
+            : last.close < last.open && last.close < prev.close;
+
+        return idealFib && (volumeSpike || priceReversal);
+    }
+
     private generateSignal(symbol: string, candles: Candle[], setup: MomentumSetup): TradingSignal {
         const isLong = setup.direction === TrendDirection.BULLISH;
         const last = candles[candles.length - 1];
 
-        // Entry with minimal buffer
-        const entryBuffer = setup.impulseATR * 0.05;
+        const entryBuffer = setup.impulseATR * 0.03; // Smaller buffer for faster entry
         const entry = isLong
             ? setup.pullbackHigh! + entryBuffer
             : setup.pullbackLow! - entryBuffer;
 
         const impulseRange = setup.impulseHigh - setup.impulseLow;
 
-        // STOP LOSS: 2.0 ATR
-        const atrBuffer = setup.impulseATR * 2.0;
-        const stopLoss = isLong
-            ? setup.pullbackLow! - atrBuffer
-            : setup.pullbackHigh! + atrBuffer;
+        // 🔧 OPTIMIZATION 9: Dynamic R:R based on volatility
+        // Higher volatility = wider stops, bigger targets
+        const atrMultiplier = this.calculateDynamicATRMultiplier(setup.impulseATR, impulseRange);
+        const stopATR = setup.impulseATR * atrMultiplier.stop;
 
-        // TAKE PROFIT: max(ImpulseRange, 3 ATR)
-        const targetDist = Math.max(impulseRange, setup.impulseATR * 3.0);
+        const stopLoss = isLong
+            ? setup.pullbackLow! - stopATR
+            : setup.pullbackHigh! + stopATR;
+
+        // Target: min(impulseRange * 1.2, 4 ATR)
+        const targetDist = Math.max(
+            impulseRange * 1.2,
+            setup.impulseATR * atrMultiplier.target
+        );
+
         const takeProfit = isLong
             ? entry + targetDist
             : entry - targetDist;
@@ -251,64 +333,84 @@ export class MomentumStrategy {
             takeProfit,
             last.timestamp,
             {
-                reason: 'momentum_pullback',
+                reason: 'momentum_pullback_v6',
                 confidence,
                 volumeRatio: setup.impulseVolumeRatio,
                 fibLevel: setup.pullbackDepth,
-                impulseATR: setup.impulseATR
+                impulseATR: setup.impulseATR,
+                rrRatio: targetDist / Math.abs(entry - stopLoss)
             }
         );
+    }
+
+    // 🔧 OPTIMIZATION 10: Dynamic ATR multipliers
+    private calculateDynamicATRMultiplier(atr: number, impulseRange: number): { stop: number; target: number } {
+        // If impulse was large (high volatility), use wider stops/targets
+        const volatilityRatio = impulseRange / atr;
+
+        if (volatilityRatio > 5) {
+            // High volatility - wider stops, bigger targets
+            return { stop: 2.5, target: 5.0 };
+        } else if (volatilityRatio > 3) {
+            // Medium volatility
+            return { stop: 2.0, target: 4.0 };
+        } else {
+            // Low volatility - tighter stops
+            return { stop: 1.5, target: 3.0 };
+        }
     }
 
     private calculateConfidence(candles: Candle[], setup: MomentumSetup): number {
         const last = candles[candles.length - 1];
         const prev = candles.length >= 2 ? candles[candles.length - 2] : last;
 
-        const clamp01 = (v: number) => Math.max(0, Math.min(v, 1));
+        const clamp = (v: number) => Math.max(0, Math.min(v, 1));
 
-        // 1) Volume quality (1.0x..3.0x mapped to 0..1)
-        const volumeScore = clamp01((setup.impulseVolumeRatio - 1.0) / 2.0);
+        // Volume quality (0.8x..3.0x → 0..1)
+        const volumeScore = clamp((setup.impulseVolumeRatio - 0.8) / 2.2);
 
-        // 2) Recency: fresher impulse is better
-        const recencyScore = clamp01(1 - (setup.barsSinceImpulse / 50));
+        // Recency bonus
+        const recencyScore = clamp(1 - (setup.barsSinceImpulse / this.PULLBACK_TIMEOUT));
 
-        // 3) Pullback depth around ideal ~0.5 fib
+        // Fib score (0.5 is ideal)
         let fibScore = 0.5;
         if (setup.pullback) {
             const impulseRange = setup.impulseHigh - setup.impulseLow;
-            if (Number.isFinite(impulseRange) && impulseRange > 0) {
+            if (this.isValidNumber(impulseRange) && impulseRange > 0) {
                 const isLong = setup.direction === TrendDirection.BULLISH;
-                const pullbackDist = isLong
+                const dist = isLong
                     ? (setup.impulseHigh - setup.pullback.level)
                     : (setup.pullback.level - setup.impulseLow);
-                const fib = pullbackDist / impulseRange;
-                fibScore = clamp01(1 - (Math.abs(fib - 0.5) / 0.2));
+                const fib = dist / impulseRange;
+                fibScore = clamp(1 - (Math.abs(fib - 0.5) / 0.3));
             }
         }
 
-        // 4) Pullback distance from EMA
-        let pullbackDistanceScore = 0.5;
-        if (setup.pullback && Number.isFinite(setup.pullback.distanceFromEMA)) {
-            pullbackDistanceScore = clamp01(1 - (setup.pullback.distanceFromEMA / 1.5));
-        }
+        // Pullback distance from EMA
+        const pullbackScore = setup.pullback
+            ? clamp(1 - (setup.pullback.distanceFromEMA / 2.0))
+            : 0.5;
 
-        // 5) Bounce strength
+        // Bounce strength
         const isLong = setup.direction === TrendDirection.BULLISH;
-        const bounceScore = clamp01(
+        const bounceScore = clamp(
             isLong
                 ? (last.close > last.open ? 0.7 : 0.3) + (last.close > prev.close ? 0.3 : 0)
                 : (last.close < last.open ? 0.7 : 0.3) + (last.close < prev.close ? 0.3 : 0)
         );
 
-        // Weighted blend
-        const score =
-            volumeScore * 0.20 +
-            recencyScore * 0.20 +
+        // Weighted blend (adjusted weights for aggressive strategy)
+        return clamp(
+            volumeScore * 0.25 +
+            recencyScore * 0.15 +
             fibScore * 0.25 +
-            pullbackDistanceScore * 0.20 +
-            bounceScore * 0.15;
+            pullbackScore * 0.20 +
+            bounceScore * 0.15
+        );
+    }
 
-        return clamp01(score);
+    private isValidNumber(n: number): boolean {
+        return Number.isFinite(n) && !Number.isNaN(n);
     }
 
     private resetSetup(symbol: string): void {

@@ -4,7 +4,7 @@ import { MarketRegime } from '../../../domain/enums/MarketRegime';
 import { IIndicators } from '../../../domain/interfaces/IIndicators';
 import { TYPES } from '../../../config/types';
 
-// Константы периодов для индикаторов
+// 🔧 OPTIMIZATION: More lenient regime classification
 const ADX_PERIOD = 14;
 const VOLATILITY_PERIOD = 20;
 const MIN_CANDLES_REQUIRED = Math.max(ADX_PERIOD * 2, VOLATILITY_PERIOD);
@@ -17,19 +17,21 @@ export class RegimeDetector {
 
     /**
      * Detect current market regime
+     * 
+     * CHANGES v6.0:
+     * - TRENDING: ADX > 15 (was 25) - more lenient
+     * - VOLATILE: ADX < 20 AND volatility > 2% (was 3%)
+     * - RANGING: Only when extremely choppy (ADX < 15 AND vol < 1%)
+     * - Reduced UNKNOWN cases
      */
     public detect(candles: Candle[]): MarketRegime {
         if (candles.length < MIN_CANDLES_REQUIRED) {
             return MarketRegime.UNKNOWN;
         }
 
-        // Calculate standard Wilder's ADX
         const adx = this.calculateStandardADX(candles, ADX_PERIOD);
-
-        // Calculate volatility
         const volatility = this.calculateVolatility(candles, VOLATILITY_PERIOD);
 
-        // Determine regime based on ADX and volatility
         return this.classifyRegime(adx, volatility);
     }
 
@@ -130,19 +132,24 @@ export class RegimeDetector {
     }
 
     private classifyRegime(adx: number, volatility: number): MarketRegime {
-        if (adx > 25) {
+        // 🔧 OPTIMIZATION: More lenient trending threshold
+        if (adx > 15) {
             return MarketRegime.TRENDING;
         }
 
-        if (adx < 20 && volatility > 3) {
+        // 🔧 OPTIMIZATION: Accept moderate volatility
+        if (adx < 20 && volatility > 2.0) {
             return MarketRegime.VOLATILE;
         }
 
-        if (adx < 20 && volatility <= 3) {
+        // 🔧 OPTIMIZATION: Only classify as RANGING when extremely choppy
+        if (adx < 15 && volatility <= 1.0) {
             return MarketRegime.RANGING;
         }
 
-        return MarketRegime.UNKNOWN;
+        // 🔧 OPTIMIZATION: Default to VOLATILE instead of UNKNOWN
+        // This gives strategy a chance to trade in uncertain conditions
+        return MarketRegime.VOLATILE;
     }
 
     public isTrendingRegime(regime: MarketRegime): boolean {
@@ -154,7 +161,9 @@ export class RegimeDetector {
     }
 
     public shouldAvoidTrading(regime: MarketRegime): boolean {
-        return regime === MarketRegime.VOLATILE || regime === MarketRegime.UNKNOWN;
+        // 🔧 OPTIMIZATION: Only avoid RANGING (too choppy)
+        // Allow VOLATILE and UNKNOWN
+        return regime === MarketRegime.RANGING;
     }
 
     public getRegimeStrength(
@@ -163,7 +172,6 @@ export class RegimeDetector {
         cachedAdx?: number,
         cachedVolatility?: number
     ): number {
-
         const adx = cachedAdx ?? this.calculateStandardADX(candles, ADX_PERIOD);
 
         switch (regime) {
@@ -178,7 +186,7 @@ export class RegimeDetector {
                 return Math.min(volatility / 5, 1);
 
             default:
-                return 0;
+                return 0.5; // Give benefit of doubt
         }
     }
 
