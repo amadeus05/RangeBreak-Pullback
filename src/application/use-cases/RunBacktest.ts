@@ -31,8 +31,6 @@ export interface BacktestResult {
 @injectable()
 export class RunBacktest {
     private logger = Logger.getInstance();
-    private readonly MAKER_FEE = 0.0002;
-    private readonly TAKER_FEE = 0.0005;
 
     constructor(
         @inject(TYPES.MomentumStrategy) private readonly strategy: MomentumStrategy,
@@ -279,22 +277,26 @@ export class RunBacktest {
                     await executionEngine.placeOrder(signal);
                 }
             }
+
+            // ❌ FIX #7: Record equity at end of each minute
+            portfolio.recordEquity(currentTime);
         }
 
-        return this.calculateStats(symbols, initialBalance, portfolio.getBalance());
+        return this.calculateStats(symbols, initialBalance, portfolio);
     }
 
     private async calculateStats(
         symbols: string[],
         initialBalance: number,
-        finalBalance: number
+        portfolio: PortfolioManager
     ): Promise<BacktestResult> {
+        const finalBalance = portfolio.getBalance();
+
+        // Use raw trade data - fees are already deducted from balance
         let totalStats = {
             totalTrades: 0,
             winningTrades: 0,
             losingTrades: 0,
-            totalPnl: 0,
-            totalFees: 0,
             grossProfit: 0,
             grossLoss: 0
         };
@@ -304,32 +306,29 @@ export class RunBacktest {
             for (const trade of history) {
                 if (trade.status === 'CLOSED' && trade.exitPrice) {
                     totalStats.totalTrades++;
-                    const entryVol = trade.entryPrice * trade.size;
-                    const exitVol = trade.exitPrice * trade.size;
-                    const entryFee = entryVol * this.TAKER_FEE;
-                    let exitFee = trade.exitReason?.includes('Stop')
-                        ? exitVol * this.TAKER_FEE
-                        : exitVol * this.MAKER_FEE;
 
-                    const tradeFee = entryFee + exitFee;
-                    totalStats.totalFees += tradeFee;
-                    const netPnl = (trade.pnl || 0) - tradeFee;
-                    totalStats.totalPnl += netPnl;
+                    // trade.pnl is raw PnL (without fees) from TradeRepository
+                    const rawPnl = trade.pnl || 0;
 
-                    if (netPnl > 0) {
+                    if (rawPnl > 0) {
                         totalStats.winningTrades++;
-                        totalStats.grossProfit += netPnl;
+                        totalStats.grossProfit += rawPnl;
                     } else {
                         totalStats.losingTrades++;
-                        totalStats.grossLoss += Math.abs(netPnl);
+                        totalStats.grossLoss += Math.abs(rawPnl);
                     }
                 }
             }
         }
 
+        // Total PnL = change in balance (already includes fees)
+        const totalPnl = finalBalance - initialBalance;
+
+        // Profit factor based on raw PnL
         const pf = totalStats.grossLoss > 0
             ? totalStats.grossProfit / totalStats.grossLoss
             : (totalStats.grossProfit > 0 ? 999 : 0);
+
         const wr = totalStats.totalTrades > 0
             ? (totalStats.winningTrades / totalStats.totalTrades) * 100
             : 0;
@@ -339,11 +338,11 @@ export class RunBacktest {
             winningTrades: totalStats.winningTrades,
             losingTrades: totalStats.losingTrades,
             winRate: wr,
-            totalPnl: totalStats.totalPnl,
+            totalPnl,
             finalBalance,
-            maxDrawdown: 0,
+            maxDrawdown: portfolio.getMaxDrawdown() * 100, // Convert to percentage
             profitFactor: pf,
-            totalFees: totalStats.totalFees
+            totalFees: initialBalance - finalBalance + (totalStats.grossProfit - totalStats.grossLoss)
         };
     }
 

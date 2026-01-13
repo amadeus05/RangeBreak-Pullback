@@ -8,6 +8,11 @@ interface TradeResult {
     netPnl: number;
 }
 
+interface EquitySnapshot {
+    timestamp: number;
+    equity: number;
+}
+
 @injectable()
 export class PortfolioManager {
     private balance: number;
@@ -15,11 +20,17 @@ export class PortfolioManager {
     private consecutiveLosses: number = 0;
     private lastDayProcessed: number = -1;
 
+    // ❌ FIX #7: Equity curve & drawdown tracking
+    private equityCurve: EquitySnapshot[] = [];
+    private peakEquity: number;
+    private maxDrawdown: number = 0;
+
     private readonly MAX_DAILY_LOSS_PERCENT = 0.10; // 10%
     private readonly MAX_CONSECUTIVE_LOSSES = 10;
 
     constructor(initialBalance: number) {
         this.balance = initialBalance;
+        this.peakEquity = initialBalance;
     }
 
     getBalance(): number {
@@ -57,17 +68,52 @@ export class PortfolioManager {
         }
     }
 
+    // ❌ FIX #5: Deduct fee (entry or exit)
+    deductFee(fee: number): void {
+        this.balance -= fee;
+    }
+
     // Обновление после закрытия сделки
     applyTradeResult(result: TradeResult): void {
-        const { netPnl } = result;
-        this.balance += netPnl;
+        const { pnl } = result;
+        // Note: netPnl = pnl - fees, but fees are already deducted via deductFee()
+        // So we only add raw pnl here
+        this.balance += pnl;
 
-        if (netPnl < 0) {
-            this.dailyLoss += Math.abs(netPnl);
+        if (result.netPnl < 0) {
+            this.dailyLoss += Math.abs(result.netPnl);
             this.consecutiveLosses++;
         } else {
             this.consecutiveLosses = 0;
         }
+    }
+
+    // ❌ FIX #7: Record equity snapshot and calculate drawdown
+    recordEquity(timestamp: number): void {
+        this.equityCurve.push({ timestamp, equity: this.balance });
+
+        // Update peak equity
+        if (this.balance > this.peakEquity) {
+            this.peakEquity = this.balance;
+        }
+
+        // Calculate current drawdown
+        const currentDrawdown = (this.peakEquity - this.balance) / this.peakEquity;
+        if (currentDrawdown > this.maxDrawdown) {
+            this.maxDrawdown = currentDrawdown;
+        }
+    }
+
+    getMaxDrawdown(): number {
+        return this.maxDrawdown;
+    }
+
+    getEquityCurve(): EquitySnapshot[] {
+        return this.equityCurve;
+    }
+
+    getPeakEquity(): number {
+        return this.peakEquity;
     }
 
     // Для тестов / сброса
