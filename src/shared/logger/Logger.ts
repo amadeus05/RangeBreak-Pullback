@@ -9,7 +9,7 @@ export class Logger {
     private static instance: Logger;
     private logLevel: LogLevel = LogLevel.INFO;
 
-    private constructor() {}
+    private constructor() { }
 
     static getInstance(): Logger {
         if (!Logger.instance) {
@@ -52,9 +52,9 @@ export class Logger {
     }
 
     private log(level: LogLevel, message: string, data?: any): void {
-        const timestamp = new Date().toISOString();
+        const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
         const logMessage = `[${timestamp}] [${level}] ${message}`;
-        
+
         switch (level) {
             case LogLevel.DEBUG:
             case LogLevel.INFO:

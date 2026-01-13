@@ -23,6 +23,14 @@ import { PullbackValidator } from '../application/services/validation/PullbackVa
 import { RiskEngine } from '../application/services/risk/RiskEngine';
 import { StateMachine } from '../application/services/state/StateMachine';
 import { RangeBreakPullbackStrategy } from '../application/strategies/RangeBreakPullbackStrategy';
+import { IIndicators } from '../domain/interfaces/IIndicators';
+import { IndicatorsProvider } from '../application/services/indicators/IndicatorsProvider';
+import { RegimeDetector } from '../application/services/market/RegimeDetector';
+import { TrendAnalyzer } from '../application/services/detection/TrendAnalyzer';
+import { PullbackScanner } from '../application/services/detection/PullbackScanner';
+import { MomentumDetector } from '../application/services/detection/MomentumDetector';
+import { TrendContinuationStrategy } from '../application/strategies/TrendContinuationStrategy';
+import { MomentumStrategy } from '../application/strategies/MomentumStrategy';
 
 // NEW: Portfolio & Execution
 import { PortfolioManager } from '../application/services/portfolio/PortfolioManager';
@@ -47,7 +55,17 @@ export function createContainer(mode: 'backtest' | 'live', initialBalance: numbe
     container.bind<IPullbackValidator>(TYPES.IPullbackValidator).to(PullbackValidator);
     container.bind<IRiskEngine>(TYPES.IRiskEngine).to(RiskEngine);
     container.bind<IStateMachine>(TYPES.IStateMachine).to(StateMachine).inSingletonScope();
-    container.bind<RangeBreakPullbackStrategy>(TYPES.Strategy).to(RangeBreakPullbackStrategy);
+
+    // New Components
+    container.bind<IIndicators>(TYPES.IIndicators).to(IndicatorsProvider).inSingletonScope();
+    container.bind<RegimeDetector>(TYPES.RegimeDetector).to(RegimeDetector).inSingletonScope();
+    container.bind<TrendAnalyzer>(TYPES.TrendAnalyzer).to(TrendAnalyzer).inSingletonScope();
+    container.bind<PullbackScanner>(TYPES.PullbackScanner).to(PullbackScanner).inSingletonScope();
+    container.bind<MomentumDetector>(TYPES.MomentumDetector).to(MomentumDetector).inSingletonScope();
+
+    // Strategy
+    container.bind<TrendContinuationStrategy>(TYPES.Strategy).to(TrendContinuationStrategy);
+    container.bind<MomentumStrategy>(TYPES.MomentumStrategy).to(MomentumStrategy).inSingletonScope();
 
     // --- NEW: Portfolio Manager (с начальным балансом) ---
     container.bind<PortfolioManager>(PortfolioManager).toConstantValue(

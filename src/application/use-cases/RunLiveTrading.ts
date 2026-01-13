@@ -1,5 +1,5 @@
 import { injectable, inject } from 'inversify';
-import { RangeBreakPullbackStrategy } from '../strategies/RangeBreakPullbackStrategy';
+import { TrendContinuationStrategy } from '../strategies/TrendContinuationStrategy';
 import { ExecutionEngine } from '../services/execution/ExecutionEngine';
 import { IExchange } from '../../domain/interfaces/IExchange';
 import { Candle } from '../../domain/entities/Candle';
@@ -19,11 +19,11 @@ export class RunLiveTrading {
     private candles1m: Candle[] = [];
 
     constructor(
-        @inject(TYPES.Strategy) private readonly strategy: RangeBreakPullbackStrategy,
+        @inject(TYPES.Strategy) private readonly strategy: TrendContinuationStrategy,
         @inject(TYPES.IExchange) private readonly exchange: IExchange,
         // Inject ExecutionEngine to actually handle the orders and positions
         @inject(ExecutionEngine) private readonly executionEngine: ExecutionEngine
-    ) {}
+    ) { }
 
     async start(config: LiveTradingConfig): Promise<void> {
         this.logger.info('Starting live trading', config);
@@ -77,8 +77,8 @@ export class RunLiveTrading {
         // 3. Generate Signal from Strategy
         // The method is generateSignal, not processTick
         const signal = this.strategy.generateSignal(
-            symbol, 
-            this.candles5m, 
+            symbol,
+            this.candles5m,
             this.candles1m
         );
 
@@ -91,7 +91,7 @@ export class RunLiveTrading {
 
     private updateCandleBuffer(buffer: Candle[], newCandle: Candle, maxSize: number): void {
         const lastCandle = buffer[buffer.length - 1];
-        
+
         if (lastCandle && lastCandle.timestamp === newCandle.timestamp) {
             buffer[buffer.length - 1] = newCandle;
         } else {

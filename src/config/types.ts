@@ -9,5 +9,11 @@ export const TYPES = {
     IPullbackValidator: Symbol.for('IPullbackValidator'),
     IRiskEngine: Symbol.for('IRiskEngine'),
     IStateMachine: Symbol.for('IStateMachine'),
-    Strategy: Symbol.for('Strategy')
+    Strategy: Symbol.for('Strategy'),
+    IIndicators: Symbol.for('IIndicators'),
+    RegimeDetector: Symbol.for('RegimeDetector'),
+    TrendAnalyzer: Symbol.for('TrendAnalyzer'),
+    PullbackScanner: Symbol.for('PullbackScanner'),
+    MomentumDetector: Symbol.for('MomentumDetector'),
+    MomentumStrategy: Symbol.for('MomentumStrategy')
 };

@@ -24,7 +24,7 @@ interface ActivePosition {
 @injectable()
 export class ExecutionEngine {
     private logger = Logger.getInstance();
-    
+
     private pendingOrders: Map<string, PendingLimitOrder> = new Map();
     private activePositions: Map<string, ActivePosition> = new Map();
 
@@ -37,7 +37,7 @@ export class ExecutionEngine {
         @inject(TYPES.IRiskEngine) private readonly riskEngine: IRiskEngine,
         @inject(PortfolioManager) private readonly portfolio: PortfolioManager,
         @inject(TradeRepository) private readonly tradeRepo: TradeRepository
-    ) {}
+    ) { }
 
     // ═══════════════════════════════════════════
     // ПУБЛИЧНЫЙ API
@@ -106,7 +106,7 @@ export class ExecutionEngine {
             timestamp: signal.timestamp
         });
 
-        const dateStr = new Date(signal.timestamp).toISOString();
+        const dateStr = new Date(signal.timestamp).toISOString().replace('T', ' ').substring(0, 19);
         this.logger.info(
             `[${dateStr}] [LIMIT ORDER] Placed ${signal.direction} @ ${signal.price.toFixed(2)} ` +
             `| SL: ${signal.stopLoss.toFixed(2)} | TP: ${signal.takeProfit.toFixed(2)} | Size: ${size.toFixed(4)}`
@@ -187,7 +187,7 @@ export class ExecutionEngine {
             entryPrice
         });
 
-        const dateStr = new Date(timestamp).toISOString();
+        const dateStr = new Date(timestamp).toISOString().replace('T', ' ').substring(0, 19);
         this.logger.info(
             `[${dateStr}] [EXECUTION] Entry ${signal.direction} @ ${entryPrice.toFixed(2)} ` +
             `| SL: ${signal.stopLoss.toFixed(2)} | TP: ${signal.takeProfit.toFixed(2)}`
@@ -254,8 +254,8 @@ export class ExecutionEngine {
         const entryVol = entryPrice * size;
         const exitVol = exitPrice * size;
         const entryFee = entryVol * this.TAKER_FEE;
-        const exitFee = reason.includes('Stop') 
-            ? exitVol * this.TAKER_FEE 
+        const exitFee = reason.includes('Stop')
+            ? exitVol * this.TAKER_FEE
             : exitVol * this.MAKER_FEE;
         const totalFee = entryFee + exitFee;
         const netPnl = rawPnl - totalFee;
@@ -269,7 +269,7 @@ export class ExecutionEngine {
         // Удаляем позицию
         this.activePositions.delete(symbol);
 
-        const dateStr = new Date(timestamp).toISOString();
+        const dateStr = new Date(timestamp).toISOString().replace('T', ' ').substring(0, 19);
         this.logger.info(
             `[${dateStr}] [EXECUTION] Exit ${signal.direction} @ ${exitPrice.toFixed(2)} ` +
             `(${reason}) | Net PnL: ${netPnl.toFixed(2)}`

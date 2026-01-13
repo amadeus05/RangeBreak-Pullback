@@ -8,6 +8,7 @@ export interface TradingSignalMeta {
     rangeHigh?: number;
     rangeLow?: number;
     atr?: number;
+    [key: string]: any;
 }
 
 export class TradingSignal {
@@ -20,7 +21,7 @@ export class TradingSignal {
         public readonly takeProfit: number,
         public readonly timestamp: number,
         public readonly meta: TradingSignalMeta
-    ) {}
+    ) { }
 
     static createLimitOrder(
         symbol: string,

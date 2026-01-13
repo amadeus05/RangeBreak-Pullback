@@ -5,7 +5,7 @@ import { TradeRepository } from '../../infrastructure/database/repositories/Trad
 import { Candle } from '../../domain/entities/Candle';
 import { Logger } from '../../shared/logger/Logger';
 import { TYPES } from '../../config/types';
-import { RangeBreakPullbackStrategy } from '../strategies/RangeBreakPullbackStrategy';
+import { MomentumStrategy } from '../strategies/MomentumStrategy';
 import { ExecutionEngine } from '../services/execution/ExecutionEngine';
 import { PortfolioManager } from '../services/portfolio/PortfolioManager';
 import { IRiskEngine } from '../../domain/interfaces/IRiskEngine';
@@ -35,12 +35,12 @@ export class RunBacktest {
     private readonly TAKER_FEE = 0.0005;
 
     constructor(
-        @inject(TYPES.Strategy) private readonly strategy: RangeBreakPullbackStrategy,
+        @inject(TYPES.MomentumStrategy) private readonly strategy: MomentumStrategy,
         @inject(TYPES.IDataFeed) private readonly dataFeed: IExchange,
         @inject(TYPES.IRiskEngine) private readonly riskEngine: IRiskEngine,
         private readonly candleRepo: CandleRepository,
         private readonly tradeRepo: TradeRepository
-    ) {}
+    ) { }
 
     async execute(config: BacktestConfig): Promise<BacktestResult> {
         this.logger.info('Starting Multi-Symbol Synchronized Backtest', config);
@@ -80,7 +80,7 @@ export class RunBacktest {
         // Проверяем кеш - есть ли уже все данные
         const cachedCount = await this.candleRepo.countInRange(symbol, timeframe, start, end);
         const expectedCount = Math.floor((end - start) / this.getTimeframeMs(timeframe));
-        
+
         // Если есть >= 95% данных, считаем что достаточно
         if (cachedCount >= expectedCount * 0.95) {
             this.logger.info(`[CACHE] ${symbol} ${timeframe}: Found ${cachedCount} candles in DB (expected ~${expectedCount})`);
@@ -90,10 +90,10 @@ export class RunBacktest {
         // Определяем откуда грузить
         const lastCandle = await this.candleRepo.getLastCandle(symbol, timeframe);
         let downloadStart = start;
-        
+
         if (lastCandle && lastCandle.timestamp > start) {
-            downloadStart = lastCandle.timestamp + this.getTimeframeMs(timeframe);
-            this.logger.info(`[CACHE] ${symbol} ${timeframe}: Resuming from ${new Date(downloadStart).toISOString()}`);
+            const dateStr = new Date(downloadStart).toISOString().replace('T', ' ').substring(0, 19);
+            this.logger.info(`[CACHE] ${symbol} ${timeframe}: Resuming from ${dateStr}`);
         } else {
             this.logger.info(`[DOWNLOAD] ${symbol} ${timeframe}: Starting fresh download...`);
         }
@@ -115,7 +115,7 @@ export class RunBacktest {
                     // Timeout wrapper
                     const batch = await Promise.race([
                         this.dataFeed.getCandles(symbol, timeframe, LIMIT, curr),
-                        new Promise<null>((_, reject) => 
+                        new Promise<null>((_, reject) =>
                             setTimeout(() => reject(new Error('Timeout')), TIMEOUT_MS)
                         )
                     ]);
@@ -134,7 +134,7 @@ export class RunBacktest {
                     }
 
                     if (batch[batch.length - 1].timestamp >= end) break;
-                    
+
                     await new Promise(r => setTimeout(r, 100)); // Rate limit
                     success = true;
 
@@ -145,12 +145,12 @@ export class RunBacktest {
                     } else {
                         this.logger.warn(`[DOWNLOAD] ${symbol} ${timeframe}: Error - ${e.message} (attempt ${retries}/${MAX_RETRIES})`);
                     }
-                    
+
                     if (retries >= MAX_RETRIES) {
                         this.logger.error(`[DOWNLOAD] ${symbol} ${timeframe}: Failed after ${MAX_RETRIES} retries, using cached data`);
                         break;
                     }
-                    
+
                     await new Promise(r => setTimeout(r, 1000 * retries)); // Exponential backoff
                 }
             }
@@ -178,7 +178,7 @@ export class RunBacktest {
         // Создаем Portfolio и Execution Engine
         const portfolio = new PortfolioManager(initialBalance);
         const executionEngine = new ExecutionEngine(
-            this.riskEngine, 
+            this.riskEngine,
             portfolio,
             this.tradeRepo
         );
@@ -198,8 +198,12 @@ export class RunBacktest {
         minTime = Math.ceil(minTime / 60000) * 60000;
         const simulationStartTime = minTime + (200 * 5 * 60 * 1000);
 
-        this.logger.info(`Data Range: ${new Date(minTime).toISOString()} - ${new Date(maxTime).toISOString()}`);
-        this.logger.info(`Simulation Start (after warmup): ${new Date(simulationStartTime).toISOString()}`);
+        const minTimeStr = new Date(minTime).toISOString().replace('T', ' ').substring(0, 19);
+        const maxTimeStr = new Date(maxTime).toISOString().replace('T', ' ').substring(0, 19);
+        const simStartTimeStr = new Date(simulationStartTime).toISOString().replace('T', ' ').substring(0, 19);
+
+        this.logger.info(`Data Range: ${minTimeStr} - ${maxTimeStr}`);
+        this.logger.info(`Simulation Start (after warmup): ${simStartTimeStr}`);
 
         let lastLoggedPercent = 0;
         const totalDuration = maxTime - simulationStartTime;
@@ -239,7 +243,7 @@ export class RunBacktest {
                 // ═══════════════════════════════════════════
                 // FIX LOOKAHEAD BIAS: Передаем только ЗАКРЫТЫЕ свечи
                 // ═══════════════════════════════════════════
-                
+
                 // 5m: Если текущая 5m свеча еще не закрылась, берем предыдущую
                 let valid5mEnd = current5mIdx;
                 if (candle5m.timestamp + 5 * 60 * 1000 > currentTime) {
@@ -252,7 +256,7 @@ export class RunBacktest {
                 // В реальности мы не знаем её close/high/low до конца минуты.
                 // Используем только свечи ДО текущей (idx1m - 1)
                 let valid1mEnd = cursor.idx1m - 1;
-                
+
                 if (valid1mEnd < 50) continue; // Нужен минимум буфер
 
                 // Prepare data
@@ -268,7 +272,7 @@ export class RunBacktest {
                 await executionEngine.onMarketData(candle1m);
 
                 // 2. Strategy генерирует сигнал
-                const signal = this.strategy.generateSignal(symbol, relevant5m, relevant1m);
+                const signal = this.strategy.analyze(symbol, relevant5m);
 
                 // 3. Если есть сигнал → отправляем в Execution
                 if (signal) {
