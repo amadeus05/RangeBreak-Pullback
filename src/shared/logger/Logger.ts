@@ -54,18 +54,40 @@ export class Logger {
     private log(level: LogLevel, message: string, data?: any): void {
         const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
         const logMessage = `[${timestamp}] [${level}] ${message}`;
+        const serializedData = this.serializeData(data);
+        const consolePayload = serializedData ? ` ${serializedData}` : '';
 
         switch (level) {
             case LogLevel.DEBUG:
             case LogLevel.INFO:
-                console.log(logMessage, data || '');
+                console.log(`${logMessage}${consolePayload}`);
                 break;
             case LogLevel.WARN:
-                console.warn(logMessage, data || '');
+                console.warn(`${logMessage}${consolePayload}`);
                 break;
             case LogLevel.ERROR:
-                console.error(logMessage, data || '');
+                console.error(`${logMessage}${consolePayload}`);
                 break;
+        }
+    }
+
+    private serializeData(data?: any): string {
+        if (data === undefined || data === null || data === '') {
+            return '';
+        }
+
+        if (data instanceof Error) {
+            return data.stack || data.message;
+        }
+
+        if (typeof data === 'string') {
+            return data;
+        }
+
+        try {
+            return JSON.stringify(data);
+        } catch {
+            return String(data);
         }
     }
 }

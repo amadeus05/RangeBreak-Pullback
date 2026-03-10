@@ -10,13 +10,11 @@ import { TYPES } from '../../../config/types';
 
 interface PendingLimitOrder {
     signal: TradingSignal;
-    size: number;
     timestamp: number;
 }
 
 interface PendingMarketOrder {
     signal: TradingSignal;
-    size: number;
     timestamp: number;
 }
 
@@ -27,6 +25,7 @@ interface ActivePosition {
     entryPrice: number;
     entryTime: number;
     entryFee: number;
+    entryMode: 'BAR_OPEN' | 'INTRABAR';
 }
 
 @injectable()
@@ -38,14 +37,12 @@ export class ExecutionEngine {
     private activePositions: Map<string, ActivePosition> = new Map();
     private lastCandles: Map<string, Candle> = new Map();
 
-    private readonly TRADING_FEE = 0.00055;
-    private readonly SLIPPAGE = 0.0001;
+    private slippage = 0.0001;
     private readonly MAKER_FEE = 0.0002;
     private readonly TAKER_FEE = 0.0005;
 
-    // Leverage & Liquidation settings
     private readonly LEVERAGE = 10;
-    private readonly MAINTENANCE_MARGIN = 0.005; // 0.5%
+    private readonly MAINTENANCE_MARGIN = 0.005;
 
     constructor(
         @inject(TYPES.IRiskEngine) private readonly riskEngine: IRiskEngine,
@@ -53,112 +50,127 @@ export class ExecutionEngine {
         @inject(TradeRepository) private readonly tradeRepo: TradeRepository
     ) { }
 
-    // ═══════════════════════════════════════════
-    // ПУБЛИЧНЫЙ API
-    // ═══════════════════════════════════════════
+    setSlippage(slippage: number): void {
+        if (!Number.isFinite(slippage) || slippage < 0) {
+            this.logger.debug(`[EXECUTION] Invalid slippage value: ${slippage}`);
+            return;
+        }
 
-    // 1. Размещение ордера (LIMIT или MARKET)
+        this.slippage = slippage;
+    }
+
     async placeOrder(signal: TradingSignal): Promise<void> {
         if (!this.portfolio.canTrade()) {
-            this.logger.warn('[EXECUTION] Kill switch active, order rejected');
+            this.logger.debug('[EXECUTION] Kill switch active, order rejected');
             return;
         }
 
-        // Проверяем, нет ли уже позиции по этому символу
         if (this.activePositions.has(signal.symbol)) {
-            this.logger.warn(`[EXECUTION] Position already exists for ${signal.symbol}`);
+            this.logger.debug(`[EXECUTION] Position already exists for ${signal.symbol}`);
             return;
         }
 
-        // Проверяем, нет ли уже pending ордера
         if (this.pendingOrders.has(signal.symbol) || this.pendingMarketOrders.has(signal.symbol)) {
-            this.logger.warn(`[EXECUTION] Order already pending for ${signal.symbol}`);
+            this.logger.debug(`[EXECUTION] Order already pending for ${signal.symbol}`);
             return;
         }
-
-        const size = this.riskEngine.calculatePositionSize(
-            this.portfolio.getBalance(),
-            signal.stopDistance
-        );
 
         if (signal.orderType === 'LIMIT') {
-            this.placeLimitOrder(signal, size);
+            this.placeLimitOrder(signal);
         } else {
-            this.queueMarketOrder(signal, size);
+            this.queueMarketOrder(signal);
         }
     }
 
-    // 2. Обработка тика рынка (проверяем лимиты и позиции)
-    async onMarketData(candle: Candle): Promise<void> {
-        // Store last candle for getCurrentPrice()
-        this.lastCandles.set(candle.symbol, candle);
-
-        // 1. Execute pending MARKET orders (fill at candle.open)
+    async onBarOpen(candle: Candle): Promise<void> {
         await this.executePendingMarketOrders(candle);
+    }
 
-        // 2. Check LIMIT orders
+    async onBarClose(candle: Candle): Promise<void> {
+        this.lastCandles.set(candle.symbol, candle);
         await this.checkLimitOrders(candle);
-
-        // 3. Manage positions (SL/TP/Liquidation)
         await this.managePositions(candle);
     }
 
-    // 3. Отмена ордера
+    async onMarketData(candle: Candle): Promise<void> {
+        await this.onBarClose(candle);
+    }
+
     cancelOrder(symbol: string): void {
         if (this.pendingOrders.has(symbol)) {
             this.pendingOrders.delete(symbol);
-            this.logger.info(`[EXECUTION] Limit order cancelled for ${symbol}`);
+            this.logger.debug(`[EXECUTION] Limit order cancelled for ${symbol}`);
         }
         if (this.pendingMarketOrders.has(symbol)) {
             this.pendingMarketOrders.delete(symbol);
-            this.logger.info(`[EXECUTION] Market order cancelled for ${symbol}`);
+            this.logger.debug(`[EXECUTION] Market order cancelled for ${symbol}`);
         }
     }
 
-    // 4. Принудительное закрытие
     async forceClosePosition(symbol: string, reason: string): Promise<void> {
         const pos = this.activePositions.get(symbol);
         if (!pos) return;
 
-        // Use last known candle price
         const exitPrice = this.getCurrentPrice(symbol);
         if (exitPrice === 0) {
             this.logger.error(`[EXECUTION] Cannot force close ${symbol}: no price data`);
             return;
         }
+
         await this.closePosition(symbol, exitPrice, Date.now(), reason);
     }
 
-    // ═══════════════════════════════════════════
-    // ПРИВАТНАЯ ЛОГИКА
-    // ═══════════════════════════════════════════
+    async closeAllOpenPositions(timestamp: number, reason: string): Promise<void> {
+        const openSymbols = Array.from(this.activePositions.keys());
+        for (const symbol of openSymbols) {
+            const exitPrice = this.getCurrentPrice(symbol);
+            if (exitPrice === 0) {
+                this.logger.warn(`[EXECUTION] Cannot close ${symbol} at backtest end: no price data`);
+                continue;
+            }
 
-    private placeLimitOrder(signal: TradingSignal, size: number): void {
+            await this.closePosition(symbol, exitPrice, timestamp, reason);
+        }
+    }
+
+    getUnrealizedPnl(): number {
+        let totalUnrealizedPnl = 0;
+
+        for (const [symbol, position] of this.activePositions.entries()) {
+            const currentPrice = this.getCurrentPrice(symbol);
+            if (currentPrice === 0) continue;
+
+            totalUnrealizedPnl += position.signal.direction === TradeDirection.LONG
+                ? (currentPrice - position.entryPrice) * position.size
+                : (position.entryPrice - currentPrice) * position.size;
+        }
+
+        return totalUnrealizedPnl;
+    }
+
+    private placeLimitOrder(signal: TradingSignal): void {
         this.pendingOrders.set(signal.symbol, {
             signal,
-            size,
             timestamp: signal.timestamp
         });
 
         const dateStr = new Date(signal.timestamp).toISOString().replace('T', ' ').substring(0, 19);
-        this.logger.info(
-            `[${dateStr}] [LIMIT ORDER] Placed ${signal.direction} @ ${signal.price.toFixed(2)} ` +
-            `| SL: ${signal.stopLoss.toFixed(2)} | TP: ${signal.takeProfit.toFixed(2)} | Size: ${size.toFixed(4)}`
+        this.logger.debug(
+            `[${dateStr}] [LIMIT ORDER] ${signal.symbol} Placed ${signal.direction} @ ${signal.price.toFixed(2)} ` +
+            `| SL: ${signal.stopLoss.toFixed(2)} | TP: ${signal.takeProfit.toFixed(2)}`
         );
     }
 
-    private queueMarketOrder(signal: TradingSignal, size: number): void {
-        // Queue for execution on next candle (realistic behavior)
+    private queueMarketOrder(signal: TradingSignal): void {
         this.pendingMarketOrders.set(signal.symbol, {
             signal,
-            size,
             timestamp: signal.timestamp
         });
 
         const dateStr = new Date(signal.timestamp).toISOString().replace('T', ' ').substring(0, 19);
-        this.logger.info(
-            `[${dateStr}] [MARKET ORDER] Queued ${signal.direction} @ ~${signal.price.toFixed(2)} ` +
-            `| SL: ${signal.stopLoss.toFixed(2)} | TP: ${signal.takeProfit.toFixed(2)} | Size: ${size.toFixed(4)}`
+        this.logger.debug(
+            `[${dateStr}] [MARKET ORDER] ${signal.symbol} Queued ${signal.direction} @ ~${signal.price.toFixed(2)} ` +
+            `| SL: ${signal.stopLoss.toFixed(2)} | TP: ${signal.takeProfit.toFixed(2)}`
         );
     }
 
@@ -166,64 +178,167 @@ export class ExecutionEngine {
         const order = this.pendingMarketOrders.get(candle.symbol);
         if (!order) return;
 
-        // ❌ FIX #2: MARKET order can only execute AFTER signal candle
         if (candle.timestamp <= order.timestamp) return;
 
         let fillPrice = candle.open;
         if (order.signal.direction === TradeDirection.LONG) {
-            fillPrice = fillPrice * (1 + this.SLIPPAGE);
+            fillPrice = fillPrice * (1 + this.slippage);
         } else {
-            fillPrice = fillPrice * (1 - this.SLIPPAGE);
+            fillPrice = fillPrice * (1 - this.slippage);
+        }
+
+        const preparedOrder = this.prepareFilledOrder(order.signal, fillPrice);
+        this.pendingMarketOrders.delete(candle.symbol);
+
+        if (!preparedOrder) {
+            return;
         }
 
         await this.openPosition(
             candle.symbol,
-            order.signal,
-            order.size,
+            preparedOrder.signal,
+            preparedOrder.size,
             fillPrice,
-            candle.timestamp
+            candle.timestamp,
+            'BAR_OPEN'
         );
-
-        this.pendingMarketOrders.delete(candle.symbol);
     }
 
     private async checkLimitOrders(candle: Candle): Promise<void> {
         const order = this.pendingOrders.get(candle.symbol);
         if (!order) return;
 
-        // ❌ FIX #3: LIMIT order can only fill AFTER signal candle
         if (candle.timestamp <= order.timestamp) return;
 
-        const { signal, size, timestamp } = order;
+        const { signal, timestamp } = order;
         const { high, low } = candle;
 
-        let filled = false;
-
-        if (signal.direction === TradeDirection.LONG) {
-            if (low <= signal.price) filled = true;
-        } else {
-            if (high >= signal.price) filled = true;
-        }
+        const filled = signal.direction === TradeDirection.LONG
+            ? low <= signal.price
+            : high >= signal.price;
 
         if (!filled) {
-            // Таймаут 2 часа
             if (candle.timestamp - timestamp > 120 * 60 * 1000) {
-                this.logger.info('[LIMIT ORDER] Expired (timeout 2h)');
+                this.logger.debug('[LIMIT ORDER] Expired (timeout 2h)');
                 this.pendingOrders.delete(candle.symbol);
             }
             return;
         }
 
-        // Исполнен
         let fillPrice = signal.price;
         if (signal.direction === TradeDirection.LONG) {
-            fillPrice = fillPrice * (1 + this.SLIPPAGE * 0.5);
+            fillPrice = fillPrice * (1 + this.slippage * 0.5);
         } else {
-            fillPrice = fillPrice * (1 - this.SLIPPAGE * 0.5);
+            fillPrice = fillPrice * (1 - this.slippage * 0.5);
         }
 
-        await this.openPosition(candle.symbol, signal, size, fillPrice, candle.timestamp);
+        const preparedOrder = this.prepareFilledOrder(signal, fillPrice);
         this.pendingOrders.delete(candle.symbol);
+
+        if (!preparedOrder) {
+            return;
+        }
+
+        await this.openPosition(
+            candle.symbol,
+            preparedOrder.signal,
+            preparedOrder.size,
+            fillPrice,
+            candle.timestamp,
+            'INTRABAR'
+        );
+    }
+
+    private prepareFilledOrder(
+        signal: TradingSignal,
+        fillPrice: number
+    ): { signal: TradingSignal; size: number } | null {
+        if (!Number.isFinite(fillPrice) || fillPrice <= 0) {
+            this.logger.debug(`[EXECUTION] Invalid fill price for ${signal.symbol}`);
+            return null;
+        }
+
+        const stopLoss = signal.stopLoss;
+        const originalTakeProfit = signal.takeProfit;
+
+        if (signal.direction === TradeDirection.LONG) {
+            if (fillPrice <= stopLoss || fillPrice >= originalTakeProfit) {
+                this.logger.debug(
+                    `[EXECUTION] Skipping LONG ${signal.symbol}: fill ${fillPrice.toFixed(2)} invalidates setup ` +
+                    `| SL ${stopLoss.toFixed(2)} | TP ${originalTakeProfit.toFixed(2)}`
+                );
+                return null;
+            }
+        } else {
+            if (fillPrice >= stopLoss || fillPrice <= originalTakeProfit) {
+                this.logger.debug(
+                    `[EXECUTION] Skipping SHORT ${signal.symbol}: fill ${fillPrice.toFixed(2)} invalidates setup ` +
+                    `| SL ${stopLoss.toFixed(2)} | TP ${originalTakeProfit.toFixed(2)}`
+                );
+                return null;
+            }
+        }
+
+        const stopDistance = Math.abs(fillPrice - stopLoss);
+        if (!Number.isFinite(stopDistance) || stopDistance <= 0) {
+            this.logger.debug(`[EXECUTION] Invalid stop distance for ${signal.symbol}`);
+            return null;
+        }
+
+        const rrRatio = this.getRiskRewardRatio(signal);
+        const takeProfit = signal.direction === TradeDirection.LONG
+            ? fillPrice + stopDistance * rrRatio
+            : fillPrice - stopDistance * rrRatio;
+
+        const size = this.riskEngine.calculatePositionSize(
+            this.portfolio.getBalance(),
+            stopDistance
+        );
+
+        if (!Number.isFinite(size) || size <= 0) {
+            this.logger.debug(`[EXECUTION] Invalid position size for ${signal.symbol}`);
+            return null;
+        }
+
+        const adjustedSignal = signal.orderType === 'LIMIT'
+            ? TradingSignal.createLimitOrder(
+                signal.symbol,
+                signal.direction,
+                fillPrice,
+                stopLoss,
+                takeProfit,
+                signal.timestamp,
+                {
+                    ...signal.meta,
+                    rrRatio
+                }
+            )
+            : TradingSignal.createMarketOrder(
+                signal.symbol,
+                signal.direction,
+                fillPrice,
+                stopLoss,
+                takeProfit,
+                signal.timestamp,
+                {
+                    ...signal.meta,
+                    rrRatio
+                }
+            );
+
+        return {
+            signal: adjustedSignal,
+            size
+        };
+    }
+
+    private getRiskRewardRatio(signal: TradingSignal): number {
+        const rrFromMeta = signal.meta?.rrRatio;
+        if (typeof rrFromMeta === 'number' && Number.isFinite(rrFromMeta) && rrFromMeta > 0) {
+            return rrFromMeta;
+        }
+
+        return signal.riskRewardRatio > 0 ? signal.riskRewardRatio : 1;
     }
 
     private async openPosition(
@@ -231,9 +346,9 @@ export class ExecutionEngine {
         signal: TradingSignal,
         size: number,
         entryPrice: number,
-        timestamp: number
+        timestamp: number,
+        entryMode: 'BAR_OPEN' | 'INTRABAR'
     ): Promise<void> {
-        // ❌ FIX #5: Deduct entry fee IMMEDIATELY
         const entryVolume = entryPrice * size;
         const entryFee = entryVolume * this.TAKER_FEE;
         this.portfolio.deductFee(entryFee);
@@ -256,13 +371,15 @@ export class ExecutionEngine {
             size,
             entryPrice,
             entryTime: timestamp,
-            entryFee
+            entryFee,
+            entryMode
         });
 
         const dateStr = new Date(timestamp).toISOString().replace('T', ' ').substring(0, 19);
-        this.logger.info(
-            `[${dateStr}] ➡️[EXECUTION] Entry ${signal.direction} @ ${entryPrice.toFixed(2)} ` +
-            `| SL: ${signal.stopLoss.toFixed(2)} | TP: ${signal.takeProfit.toFixed(2)} | Fee: ${entryFee.toFixed(4)}`
+        console.log(
+            `[${dateStr}] 🚀 ${signal.symbol} ${signal.direction} @ ${entryPrice.toFixed(2)} ` +
+            `| SL: ${signal.stopLoss.toFixed(2)} | TP: ${signal.takeProfit.toFixed(2)} ` +
+            `| Size: ${size.toFixed(4)} | Fee: ${entryFee.toFixed(4)}`
         );
     }
 
@@ -270,24 +387,17 @@ export class ExecutionEngine {
         const pos = this.activePositions.get(candle.symbol);
         if (!pos) return;
 
-        // ❌ FIX #1: Skip management on entry candle
-        // We don't know if low/high was BEFORE or AFTER our entry
-        if (candle.timestamp === pos.entryTime) return;
+        if (candle.timestamp === pos.entryTime && pos.entryMode !== 'BAR_OPEN') return;
 
-        const { signal, entryPrice, size, tradeId } = pos;
+        const { signal, entryPrice, size } = pos;
         const { high, low, timestamp } = candle;
 
-        // ❌ FIX #6: Calculate liquidation price
-        const liquidationPrice = this.calculateLiquidationPrice(
-            entryPrice,
-            signal.direction
-        );
+        const liquidationPrice = this.calculateLiquidationPrice(entryPrice, signal.direction);
 
         let exitPrice: number | null = null;
         let exitReason = '';
 
         if (signal.direction === TradeDirection.LONG) {
-            // Check worst-case first: Liquidation > Stop Loss > Take Profit
             if (low <= liquidationPrice) {
                 exitPrice = liquidationPrice;
                 exitReason = 'LIQUIDATED';
@@ -299,7 +409,6 @@ export class ExecutionEngine {
                 exitReason = 'Take Profit';
             }
         } else {
-            // SHORT: Check worst-case first
             if (high >= liquidationPrice) {
                 exitPrice = liquidationPrice;
                 exitReason = 'LIQUIDATED';
@@ -318,13 +427,11 @@ export class ExecutionEngine {
     }
 
     private calculateLiquidationPrice(entryPrice: number, direction: TradeDirection): number {
-        // Liquidation = entry * (1 - 1/leverage + maintenance) for LONG
-        // Liquidation = entry * (1 + 1/leverage - maintenance) for SHORT
         if (direction === TradeDirection.LONG) {
             return entryPrice * (1 - (1 / this.LEVERAGE) + this.MAINTENANCE_MARGIN);
-        } else {
-            return entryPrice * (1 + (1 / this.LEVERAGE) - this.MAINTENANCE_MARGIN);
         }
+
+        return entryPrice * (1 + (1 / this.LEVERAGE) - this.MAINTENANCE_MARGIN);
     }
 
     private async closePosition(
@@ -338,52 +445,55 @@ export class ExecutionEngine {
 
         const { signal, entryPrice, size, tradeId, entryFee } = pos;
 
-        // Slippage on exit
         if (signal.direction === TradeDirection.LONG) {
-            exitPrice = exitPrice * (1 - this.SLIPPAGE);
+            exitPrice = exitPrice * (1 - this.slippage);
         } else {
-            exitPrice = exitPrice * (1 + this.SLIPPAGE);
+            exitPrice = exitPrice * (1 + this.slippage);
         }
 
-        // Расчет PnL
         const rawPnl = signal.direction === TradeDirection.LONG
             ? (exitPrice - entryPrice) * size
             : (entryPrice - exitPrice) * size;
 
-        // ❌ FIX #5: Exit fee only (entry fee already deducted)
         const exitVol = exitPrice * size;
         const exitFee = reason.includes('Stop') || reason === 'LIQUIDATED'
             ? exitVol * this.TAKER_FEE
             : exitVol * this.MAKER_FEE;
 
-        // Deduct exit fee
         this.portfolio.deductFee(exitFee);
 
         const totalFee = entryFee + exitFee;
         const netPnl = rawPnl - totalFee;
 
-        // Сохраняем в БД
         await this.tradeRepo.closeTrade(tradeId, exitPrice, timestamp, reason);
-
-        // Обновляем портфель (PnL without fees - fees already deducted)
         this.portfolio.applyTradeResult({ pnl: rawPnl, fees: totalFee, netPnl });
-
-        // Удаляем позицию
         this.activePositions.delete(symbol);
 
         const dateStr = new Date(timestamp).toISOString().replace('T', ' ').substring(0, 19);
-        const color = (reason.includes('Stop') || reason === 'LIQUIDATED') ? '\x1b[31m' : (reason.includes('Profit') ? '\x1b[32m' : '');
-        const reset = color ? '\x1b[0m' : '';
-
-        this.logger.info(
-            `${color}[${dateStr}] 🏁[EXECUTION] Exit ${signal.direction} @ ${exitPrice.toFixed(2)} ` +
-            `(${reason}) | Net PnL: ${netPnl.toFixed(2)} | Fees: ${totalFee.toFixed(4)}${reset}`
+        console.log(
+            `[${dateStr}] 🏁 ${signal.symbol} ${signal.direction} @ ${exitPrice.toFixed(2)} ` +
+            `(${this.formatExitReason(reason)}) | Net PnL: ${this.colorizePnl(netPnl)} | Fees: ${totalFee.toFixed(4)}`
         );
     }
 
-    // ❌ FIX #8: Use last known candle price
     private getCurrentPrice(symbol: string): number {
         const candle = this.lastCandles.get(symbol);
         return candle ? candle.close : 0;
+    }
+
+    private formatExitReason(reason: string): string {
+        switch (reason) {
+            case 'Take Profit':
+                return '✅ Take Profit';
+            case 'Stop Loss':
+                return '❌ Stop Loss';
+            default:
+                return reason;
+        }
+    }
+
+    private colorizePnl(netPnl: number): string {
+        const color = netPnl >= 0 ? '\x1b[32m' : '\x1b[31m';
+        return `${color}${netPnl.toFixed(2)}\x1b[0m`;
     }
 }

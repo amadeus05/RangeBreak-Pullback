@@ -14,6 +14,32 @@ export interface BacktestConfig {
     symbols: string[];
     days: number;
     initialBalance: number;
+    startDay?: number;
+    endDay?: number;
+    slippageBps?: number;
+}
+
+export interface DirectionTradeStats {
+    totalTrades: number;
+    winningTrades: number;
+    losingTrades: number;
+    totalPnl: number;
+}
+
+export interface MonthlyTradeStats {
+    month: string;
+    totalTrades: number;
+    winningTrades: number;
+    losingTrades: number;
+    totalPnl: number;
+}
+
+export interface SymbolTradeStats {
+    symbol: string;
+    totalTrades: number;
+    winningTrades: number;
+    losingTrades: number;
+    totalPnl: number;
 }
 
 export interface BacktestResult {
@@ -26,6 +52,12 @@ export interface BacktestResult {
     maxDrawdown: number;
     profitFactor?: number;
     totalFees?: number;
+    directionStats: {
+        long: DirectionTradeStats;
+        short: DirectionTradeStats;
+    };
+    monthlyStats: MonthlyTradeStats[];
+    symbolStats: SymbolTradeStats[];
 }
 
 @injectable()
@@ -66,7 +98,14 @@ export class RunBacktest {
         const validSymbols = config.symbols.filter(s => dataMap.has(s));
         if (validSymbols.length === 0) return this.getEmptyResult(config.initialBalance);
 
-        return this.runSynchronizedSimulation(validSymbols, dataMap, config.initialBalance);
+        return this.runSynchronizedSimulation(
+            validSymbols,
+            dataMap,
+            config.initialBalance,
+            config.startDay,
+            config.endDay,
+            config.slippageBps
+        );
     }
 
     private async fetchHistoricalData(
@@ -75,17 +114,15 @@ export class RunBacktest {
         start: number,
         end: number
     ): Promise<Candle[]> {
-        // Проверяем кеш - есть ли уже все данные
+
         const cachedCount = await this.candleRepo.countInRange(symbol, timeframe, start, end);
         const expectedCount = Math.floor((end - start) / this.getTimeframeMs(timeframe));
 
-        // Если есть >= 95% данных, считаем что достаточно
         if (cachedCount >= expectedCount * 0.95) {
             this.logger.info(`[CACHE] ${symbol} ${timeframe}: Found ${cachedCount} candles in DB (expected ~${expectedCount})`);
             return await this.candleRepo.getCandles(symbol, timeframe, start, end);
         }
 
-        // Определяем откуда грузить
         const lastCandle = await this.candleRepo.getLastCandle(symbol, timeframe);
         let downloadStart = start;
 
@@ -96,11 +133,10 @@ export class RunBacktest {
             this.logger.info(`[DOWNLOAD] ${symbol} ${timeframe}: Starting fresh download...`);
         }
 
-        // Скачиваем недостающие данные
         let curr = downloadStart;
         const LIMIT = 1000;
         const MAX_RETRIES = 3;
-        const TIMEOUT_MS = 10000; // 10 секунд на запрос
+        const TIMEOUT_MS = 10000;
         let loopCount = 0;
         let totalDownloaded = 0;
 
@@ -110,7 +146,7 @@ export class RunBacktest {
 
             while (retries < MAX_RETRIES && !success) {
                 try {
-                    // Timeout wrapper
+ 
                     const batch = await Promise.race([
                         this.dataFeed.getCandles(symbol, timeframe, LIMIT, curr),
                         new Promise<null>((_, reject) =>
@@ -171,17 +207,21 @@ export class RunBacktest {
     private async runSynchronizedSimulation(
         symbols: string[],
         dataMap: Map<string, { candles5m: Candle[], candles1m: Candle[] }>,
-        initialBalance: number
+        initialBalance: number,
+        startDay?: number,
+        endDay?: number,
+        slippageBps?: number
     ): Promise<BacktestResult> {
-        // Создаем Portfolio и Execution Engine
+
         const portfolio = new PortfolioManager(initialBalance);
         const executionEngine = new ExecutionEngine(
             this.riskEngine,
             portfolio,
             this.tradeRepo
         );
+        const effectiveSlippageBps = slippageBps ?? 0.5;
+        executionEngine.setSlippage(effectiveSlippageBps / 10000);
 
-        // Timeline
         let minTime = Number.MAX_SAFE_INTEGER;
         let maxTime = 0;
 
@@ -194,23 +234,36 @@ export class RunBacktest {
         }
 
         minTime = Math.ceil(minTime / 60000) * 60000;
-        const simulationStartTime = minTime + (200 * 5 * 60 * 1000);
+
+        let simulationStartTime = minTime + (200 * 5 * 60 * 1000);
+        let simulationEndTime = maxTime;
+
+        if (startDay !== undefined) {
+            const offsetStart = minTime + (startDay * 24 * 60 * 60 * 1000);
+            simulationStartTime = Math.max(simulationStartTime, offsetStart);
+        }
+
+        if (endDay !== undefined) {
+            const offsetEnd = minTime + (endDay * 24 * 60 * 60 * 1000);
+            simulationEndTime = Math.min(simulationEndTime, offsetEnd);
+        }
 
         const minTimeStr = new Date(minTime).toISOString().replace('T', ' ').substring(0, 19);
         const maxTimeStr = new Date(maxTime).toISOString().replace('T', ' ').substring(0, 19);
         const simStartTimeStr = new Date(simulationStartTime).toISOString().replace('T', ' ').substring(0, 19);
+        const simEndTimeStr = new Date(simulationEndTime).toISOString().replace('T', ' ').substring(0, 19);
 
-        this.logger.info(`Data Range: ${minTimeStr} - ${maxTimeStr}`);
-        this.logger.info(`Simulation Start (after warmup): ${simStartTimeStr}`);
+        this.logger.info(`Full Data Range: ${minTimeStr} - ${maxTimeStr}`);
+        this.logger.info(`Backtest Period: ${simStartTimeStr} - ${simEndTimeStr}`);
+        this.logger.info(`Backtest Slippage: ${effectiveSlippageBps.toFixed(2)} bps`);
 
         let lastLoggedPercent = 0;
-        const totalDuration = maxTime - simulationStartTime;
+        const totalDuration = simulationEndTime - simulationStartTime;
 
         const cursors = new Map<string, { idx5m: number, idx1m: number }>();
         for (const sym of symbols) cursors.set(sym, { idx5m: 0, idx1m: 0 });
 
-        // MAIN LOOP
-        for (let currentTime = simulationStartTime; currentTime <= maxTime; currentTime += 60 * 1000) {
+        for (let currentTime = simulationStartTime; currentTime <= simulationEndTime; currentTime += 60 * 1000) {
             const progress = Math.floor(((currentTime - simulationStartTime) / totalDuration) * 100);
             if (progress > lastLoggedPercent && progress % 10 === 0) {
                 this.logger.info(`Simulation: ${progress}%`);
@@ -223,11 +276,10 @@ export class RunBacktest {
                 const data = dataMap.get(symbol)!;
                 const cursor = cursors.get(symbol)!;
 
-                // Advance cursors
                 while (cursor.idx1m < data.candles1m.length - 1 && data.candles1m[cursor.idx1m].timestamp < currentTime) {
                     cursor.idx1m++;
                 }
-                const candle1m = data.candles1m[cursor.idx1m];
+                const current1m = data.candles1m[cursor.idx1m];
 
                 while (cursor.idx5m < data.candles5m.length - 1 && data.candles5m[cursor.idx5m + 1].timestamp <= currentTime) {
                     cursor.idx5m++;
@@ -235,14 +287,8 @@ export class RunBacktest {
                 const current5mIdx = cursor.idx5m;
                 const candle5m = data.candles5m[current5mIdx];
 
-                // Validation
-                if (!candle1m || candle1m.timestamp !== currentTime) continue;
+                if (!current1m || current1m.timestamp !== currentTime) continue;
 
-                // ═══════════════════════════════════════════
-                // FIX LOOKAHEAD BIAS: Передаем только ЗАКРЫТЫЕ свечи
-                // ═══════════════════════════════════════════
-
-                // 5m: Если текущая 5m свеча еще не закрылась, берем предыдущую
                 let valid5mEnd = current5mIdx;
                 if (candle5m.timestamp + 5 * 60 * 1000 > currentTime) {
                     valid5mEnd = current5mIdx - 1;
@@ -250,37 +296,37 @@ export class RunBacktest {
 
                 if (valid5mEnd < 250) continue;
 
-                // 1m: Текущая свеча (cursor.idx1m) еще НЕ закрыта!
-                // В реальности мы не знаем её close/high/low до конца минуты.
-                // Используем только свечи ДО текущей (idx1m - 1)
                 let valid1mEnd = cursor.idx1m - 1;
 
-                if (valid1mEnd < 50) continue; // Нужен минимум буфер
+                if (valid1mEnd < 50) continue;
 
-                // Prepare data
                 const startBuf = Math.max(0, valid5mEnd - 300);
                 const relevant5m = data.candles5m.slice(startBuf, valid5mEnd + 1);
-                const relevant1m = data.candles1m.slice(Math.max(0, valid1mEnd - 50), valid1mEnd + 1);
+                const closed1m = data.candles1m[valid1mEnd];
+
+                if (!closed1m) continue;
 
                 // ═══════════════════════════════════════════
-                // ЕДИНЫЙ ЦИКЛ (как в примере)
+                // ЕДИНЫЙ ЦИКЛ
                 // ═══════════════════════════════════════════
 
-                // 1. Execution Engine обрабатывает рынок
-                await executionEngine.onMarketData(candle1m);
+                await executionEngine.onBarClose(closed1m);
 
-                // 2. Strategy генерирует сигнал
                 const signal = this.strategy.analyze(symbol, relevant5m);
 
-                // 3. Если есть сигнал → отправляем в Execution
                 if (signal) {
                     await executionEngine.placeOrder(signal);
                 }
+
+                await executionEngine.onBarOpen(current1m);
             }
 
-            // ❌ FIX #7: Record equity at end of each minute
-            portfolio.recordEquity(currentTime);
+            const markedEquity = portfolio.getBalance() + executionEngine.getUnrealizedPnl();
+            portfolio.recordEquity(currentTime, markedEquity);
         }
+
+        await executionEngine.closeAllOpenPositions(simulationEndTime, 'End of Backtest');
+        portfolio.recordEquity(simulationEndTime, portfolio.getBalance());
 
         return this.calculateStats(symbols, initialBalance, portfolio);
     }
@@ -292,7 +338,13 @@ export class RunBacktest {
     ): Promise<BacktestResult> {
         const finalBalance = portfolio.getBalance();
 
-        // Use raw trade data - fees are already deducted from balance
+        const directionStats = {
+            long: this.createDirectionStats(),
+            short: this.createDirectionStats()
+        };
+        const monthlyStatsMap = new Map<string, MonthlyTradeStats>();
+        const symbolStatsMap = new Map<string, SymbolTradeStats>();
+
         let totalStats = {
             totalTrades: 0,
             winningTrades: 0,
@@ -307,15 +359,55 @@ export class RunBacktest {
                 if (trade.status === 'CLOSED' && trade.exitPrice) {
                     totalStats.totalTrades++;
 
-                    // trade.pnl is raw PnL (without fees) from TradeRepository
                     const rawPnl = trade.pnl || 0;
+                    const directionKey = trade.direction === 'LONG' ? 'long' : 'short';
+                    const directionStat = directionStats[directionKey];
+                    directionStat.totalTrades++;
+                    directionStat.totalPnl += rawPnl;
+
+                    let symbolStats = symbolStatsMap.get(symbol);
+                    if (!symbolStats) {
+                        symbolStats = {
+                            symbol,
+                            totalTrades: 0,
+                            winningTrades: 0,
+                            losingTrades: 0,
+                            totalPnl: 0
+                        };
+                        symbolStatsMap.set(symbol, symbolStats);
+                    }
+
+                    symbolStats.totalTrades++;
+                    symbolStats.totalPnl += rawPnl;
+
+                    const monthKey = this.formatMonthKey(trade.exitTime ?? trade.entryTime);
+                    let monthStats = monthlyStatsMap.get(monthKey);
+                    if (!monthStats) {
+                        monthStats = {
+                            month: monthKey,
+                            totalTrades: 0,
+                            winningTrades: 0,
+                            losingTrades: 0,
+                            totalPnl: 0
+                        };
+                        monthlyStatsMap.set(monthKey, monthStats);
+                    }
+
+                    monthStats.totalTrades++;
+                    monthStats.totalPnl += rawPnl;
 
                     if (rawPnl > 0) {
                         totalStats.winningTrades++;
                         totalStats.grossProfit += rawPnl;
+                        directionStat.winningTrades++;
+                        symbolStats.winningTrades++;
+                        monthStats.winningTrades++;
                     } else {
                         totalStats.losingTrades++;
                         totalStats.grossLoss += Math.abs(rawPnl);
+                        directionStat.losingTrades++;
+                        symbolStats.losingTrades++;
+                        monthStats.losingTrades++;
                     }
                 }
             }
@@ -333,6 +425,14 @@ export class RunBacktest {
             ? (totalStats.winningTrades / totalStats.totalTrades) * 100
             : 0;
 
+        const monthlyStats = Array.from(monthlyStatsMap.values())
+            .sort((a, b) => a.month.localeCompare(b.month));
+        const symbolStats = Array.from(symbolStatsMap.values())
+            .sort((a, b) => {
+                if (b.totalPnl !== a.totalPnl) return b.totalPnl - a.totalPnl;
+                return a.symbol.localeCompare(b.symbol);
+            });
+
         return {
             totalTrades: totalStats.totalTrades,
             winningTrades: totalStats.winningTrades,
@@ -342,7 +442,10 @@ export class RunBacktest {
             finalBalance,
             maxDrawdown: portfolio.getMaxDrawdown() * 100, // Convert to percentage
             profitFactor: pf,
-            totalFees: initialBalance - finalBalance + (totalStats.grossProfit - totalStats.grossLoss)
+            totalFees: initialBalance - finalBalance + (totalStats.grossProfit - totalStats.grossLoss),
+            directionStats,
+            monthlyStats,
+            symbolStats
         };
     }
 
@@ -354,7 +457,28 @@ export class RunBacktest {
             winRate: 0,
             totalPnl: 0,
             finalBalance: balance,
-            maxDrawdown: 0
+            maxDrawdown: 0,
+            directionStats: {
+                long: this.createDirectionStats(),
+                short: this.createDirectionStats()
+            },
+            monthlyStats: [],
+            symbolStats: []
         };
+    }
+
+    private createDirectionStats(): DirectionTradeStats {
+        return {
+            totalTrades: 0,
+            winningTrades: 0,
+            losingTrades: 0,
+            totalPnl: 0
+        };
+    }
+
+    private formatMonthKey(timestamp: number): string {
+        const date = new Date(timestamp);
+        const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+        return `${date.getUTCFullYear()}-${month}`;
     }
 }

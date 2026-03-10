@@ -89,16 +89,18 @@ export class PortfolioManager {
     }
 
     // ❌ FIX #7: Record equity snapshot and calculate drawdown
-    recordEquity(timestamp: number): void {
-        this.equityCurve.push({ timestamp, equity: this.balance });
+    recordEquity(timestamp: number, equity: number = this.balance): void {
+        this.equityCurve.push({ timestamp, equity });
 
         // Update peak equity
-        if (this.balance > this.peakEquity) {
-            this.peakEquity = this.balance;
+        if (equity > this.peakEquity) {
+            this.peakEquity = equity;
         }
 
         // Calculate current drawdown
-        const currentDrawdown = (this.peakEquity - this.balance) / this.peakEquity;
+        const currentDrawdown = this.peakEquity > 0
+            ? (this.peakEquity - equity) / this.peakEquity
+            : 0;
         if (currentDrawdown > this.maxDrawdown) {
             this.maxDrawdown = currentDrawdown;
         }

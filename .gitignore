@@ -6,3 +6,4 @@ dist/
 *.db-journal
 prisma/migrations/
 todo.md
+singlefile-code.txt

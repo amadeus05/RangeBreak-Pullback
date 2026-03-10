@@ -64,7 +64,7 @@ export class MomentumStrategy {
         @inject(TYPES.PullbackScanner) private readonly pullbackScanner: PullbackScanner,
         @inject(TYPES.RegimeDetector) private readonly regimeDetector: RegimeDetector
     ) {
-        this.logger.info('StrategyEngine', 'Initialized (Momentum v6.0 - Aggressive)');
+        this.logger.debug('StrategyEngine Initialized (Momentum v6.0 - Aggressive)');
     }
 
     public analyze(symbol: string, candles: Candle[]): TradingSignal | null {
@@ -437,6 +437,6 @@ export class MomentumStrategy {
     }
 
     private info(symbol: string, label: string, data?: any) {
-        this.logger.info(`STRATEGY | ${symbol} | ${label}`, data);
+        this.logger.debug(`STRATEGY | ${symbol} | ${label}`, data);
     }
 }
